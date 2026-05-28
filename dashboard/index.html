@@ -1,0 +1,466 @@
+<!doctype html>
+<html lang="th" data-theme="dark">
+
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>StrikeSense · Fight Console</title>
+
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link
+    href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=IBM+Plex+Mono:wght@400;500;600&family=Inter:wght@400;500;600;700&display=swap"
+    rel="stylesheet">
+
+  <link rel="stylesheet" href="./style.css">
+</head>
+
+<body>
+
+  <!-- ────────── TOPBAR ────────── -->
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark">⛒</span>
+      <span class="brand-name">STRIKESENSE</span>
+      <span class="brand-sub">FIGHT CONSOLE</span>
+    </div>
+
+    <div class="topbar-mid">
+      <span id="recPill" class="pill pill-off"><span class="pill-dot"></span><span id="recPillTxt">STANDBY</span></span>
+      <span class="topbar-meta">
+        <span class="meta-k">ROUND</span><span class="meta-v" id="curRound">—</span>
+        <span class="meta-k">PHASE</span><span class="meta-v" id="curPhase">—</span>
+        <span class="meta-k">CLOCK</span><span class="meta-v mono" id="curClock">00:00</span>
+      </span>
+    </div>
+
+    <div class="topbar-right">
+      <button class="icon-btn" id="btnTheme" title="Toggle theme (T)">◐</button>
+      <button class="icon-btn" id="btnHeatmap" title="Toggle body heatmap (H)">▦</button>
+      <button class="icon-btn" id="btnFullscreen" title="Fullscreen (F)">⛶</button>
+      <button class="icon-btn" id="btnHelp" title="Shortcuts (?)">?</button>
+      <span class="conn" id="conn"><span class="conn-dot"></span><span id="connTxt">Connecting…</span></span>
+    </div>
+  </header>
+
+  <!-- ────────── MAIN GRID ────────── -->
+  <main class="layout">
+
+    <!-- ░░░░ LEFT RAIL ░░░░ -->
+    <aside class="rail rail-left">
+
+      <!-- Athlete block -->
+      <section class="block athlete">
+        <div class="kicker">นักมวย · ATHLETE</div>
+        <input id="athleteName" class="athlete-input" type="text" value="Fighter 1" maxlength="32" list="athleteHistory"
+          autocomplete="off">
+        <datalist id="athleteHistory"></datalist>
+        <div class="athlete-meta">
+          <label class="select-wrap">
+            <span class="kicker tiny">DRILL</span>
+            <select id="drillType">
+              <option value="shadow">Shadow</option>
+              <option value="pad" selected>Pad Work</option>
+              <option value="bag">Heavy Bag</option>
+              <option value="spar">Sparring</option>
+              <option value="free">Freestyle</option>
+            </select>
+          </label>
+          <label class="select-wrap">
+            <span class="kicker tiny">MODE</span>
+            <select id="roundPreset">
+              <option value="3x3">3 × 3:00 / 1:00</option>
+              <option value="5x3" selected>5 × 3:00 / 1:00</option>
+              <option value="3x2">3 × 2:00 / 0:30</option>
+              <option value="12x3">12 × 3:00 / 1:00</option>
+              <option value="stopwatch">Stopwatch (free)</option>
+              <option value="custom">Custom…</option>
+            </select>
+          </label>
+        </div>
+      </section>
+
+      <!-- REC + Round dial -->
+      <section class="block dial-block">
+        <div class="dial-wrap">
+          <svg viewBox="0 0 220 220" class="dial" id="roundDial">
+            <circle cx="110" cy="110" r="98" class="dial-track" />
+            <circle cx="110" cy="110" r="98" class="dial-fill" id="dialFill" pathLength="100" stroke-dasharray="100 100"
+              stroke-dashoffset="100" />
+            <text x="110" y="100" text-anchor="middle" class="dial-clock" id="dialClock">00:00</text>
+            <text x="110" y="135" text-anchor="middle" class="dial-phase" id="dialPhase">READY</text>
+            <text x="110" y="158" text-anchor="middle" class="dial-round" id="dialRound">— / —</text>
+          </svg>
+          <button class="rec-btn" id="btnRec" type="button">
+            <span class="rec-dot"></span><span class="rec-label" id="btnRecLabel">RECORD</span>
+          </button>
+        </div>
+
+        <div class="dial-controls">
+          <button class="tbtn" id="btnRoundReset" type="button">RESET</button>
+          <button class="tbtn" id="btnRoundSkip" type="button">SKIP&nbsp;»</button>
+          <button class="tbtn" id="btnMarker" type="button" title="Add marker (M)">+ MARKER</button>
+          <label class="check"><input type="checkbox" id="autoRec" checked> auto&nbsp;rec/round</label>
+        </div>
+      </section>
+
+      <!-- Session stats -->
+      <section class="block stats-block">
+        <div class="kicker">SESSION TOTALS</div>
+        <div class="stats-grid">
+          <div class="stat">
+            <div class="stat-lbl">PEAK</div>
+            <div class="stat-val mono" id="stPeak"><span class="stat-num">0.0</span><span class="stat-unit">g</span>
+            </div>
+          </div>
+          <div class="stat">
+            <div class="stat-lbl">AVG</div>
+            <div class="stat-val mono" id="stAvg"><span class="stat-num">0.0</span><span class="stat-unit">g</span>
+            </div>
+          </div>
+          <div class="stat">
+            <div class="stat-lbl">STRIKES</div>
+            <div class="stat-val mono" id="stCount">0</div>
+          </div>
+          <div class="stat">
+            <div class="stat-lbl">SPM</div>
+            <div class="stat-val mono" id="stSpm">0</div>
+          </div>
+          <div class="stat">
+            <div class="stat-lbl">TIME-ON-TARGET</div>
+            <div class="stat-val mono" id="stToT">0<span class="stat-unit">%</span></div>
+          </div>
+          <div class="stat">
+            <div class="stat-lbl">WORK</div>
+            <div class="stat-val mono" id="stWork">0.0<span class="stat-unit">kJ</span></div>
+          </div>
+          <div class="stat span2">
+            <div class="stat-lbl">SESSION TIME</div>
+            <div class="stat-val mono big" id="stDuration">00:00:00</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Goals -->
+      <section class="block goals-block">
+        <div class="block-head">
+          <div class="kicker">TRAINING GOAL</div>
+          <button class="chip ghost" id="btnEditGoals" type="button">EDIT</button>
+        </div>
+        <div class="goal-row">
+          <span class="goal-name">STRIKES</span>
+          <div class="goal-bar"><span class="goal-fill" id="goalStrFill"></span></div>
+          <span class="goal-text mono" id="goalStrTxt">0 / 100</span>
+        </div>
+        <div class="goal-row">
+          <span class="goal-name">PEAK ≥</span>
+          <div class="goal-bar"><span class="goal-fill" id="goalPeakFill"></span></div>
+          <span class="goal-text mono" id="goalPeakTxt">0 / 8 g</span>
+        </div>
+        <div class="goal-status" id="goalStatus">— set a target, hit it, repeat —</div>
+      </section>
+
+      <!-- Per-round summary -->
+      <section class="block round-summary">
+        <div class="kicker">ROUND-BY-ROUND</div>
+        <div class="round-table-wrap">
+          <table class="round-table mono" id="roundTbl">
+            <thead>
+              <tr>
+                <th>R</th>
+                <th class="num">STR</th>
+                <th class="num">PEAK</th>
+                <th class="num">AVG</th>
+                <th class="num">FATIG</th>
+              </tr>
+            </thead>
+            <tbody id="roundTbody">
+              <tr class="empty">
+                <td colspan="5">— round summary will appear here —</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- Activity feed -->
+      <section class="block activity-block">
+        <div class="kicker">RECENT ACTIVITY</div>
+        <ul class="activity-list" id="activityList">
+          <li class="dim">— no activity yet —</li>
+        </ul>
+      </section>
+    </aside>
+
+    <!-- ░░░░ CENTER STAGE ░░░░ -->
+    <section class="stage">
+
+      <!-- TOP: body diagram + mixer + distribution -->
+      <div class="stage-top">
+
+        <div class="block body-block">
+          <div class="block-head">
+            <div class="kicker">HIT ZONES</div>
+            <span class="seg-toggle">
+              <button class="seg-btn seg-on" data-bmode="live" id="bmLive">LIVE</button>
+              <button class="seg-btn" data-bmode="heat" id="bmHeat">HEATMAP</button>
+            </span>
+          </div>
+          <div class="body-wrap">
+            <svg viewBox="0 0 240 360" class="body" id="bodySvg" aria-hidden="true">
+              <g class="body-silhouette" fill="#1a1a1f" stroke="#2a2a30" stroke-width="1">
+                <circle cx="120" cy="38" r="22" />
+                <rect x="110" y="58" width="20" height="12" />
+                <path d="M78 70 L162 70 L172 130 L168 200 L72 200 L68 130 Z" />
+                <rect x="72" y="198" width="96" height="6" fill="#d62631" opacity=".5" />
+                <path d="M78 78 L52 110 L40 175 L48 220 L62 220 L66 178 L72 132 Z" />
+                <path d="M162 78 L188 110 L200 175 L192 220 L178 220 L174 178 L168 132 Z" />
+                <path d="M84 204 L78 280 L74 350 L98 350 L102 280 L106 204 Z" />
+                <path d="M138 204 L142 280 L146 350 L168 350 L166 280 L156 204 Z" />
+              </g>
+              <g class="hitzones">
+                <g class="zone" data-slot="2" id="zone-2">
+                  <circle cx="44" cy="225" r="22" />
+                  <text x="44" y="229" text-anchor="middle">RH</text>
+                </g>
+                <g class="zone" data-slot="1" id="zone-1">
+                  <circle cx="196" cy="225" r="22" />
+                  <text x="196" y="229" text-anchor="middle">LH</text>
+                </g>
+                <g class="zone" data-slot="4" id="zone-4">
+                  <circle cx="88" cy="320" r="22" />
+                  <text x="88" y="324" text-anchor="middle">RS</text>
+                </g>
+                <g class="zone" data-slot="3" id="zone-3">
+                  <circle cx="152" cy="320" r="22" />
+                  <text x="152" y="324" text-anchor="middle">LS</text>
+                </g>
+              </g>
+            </svg>
+
+            <!-- Live VU mixer with sparklines -->
+            <div class="mixer" id="mixer"></div>
+          </div>
+        </div>
+
+        <!-- Distribution / histogram / asym / fatigue -->
+        <div class="block dist-block">
+          <div class="kicker">STRIKE DISTRIBUTION</div>
+          <div class="dist-list" id="distList"></div>
+
+          <div class="kicker tiny mt-4">FORCE HISTOGRAM</div>
+          <div class="hist" id="histBars">
+            <div class="hist-bar" data-range="1-3"><span class="hist-fill"></span><span
+                class="hist-lbl">1-3g</span><span class="hist-cnt">0</span></div>
+            <div class="hist-bar" data-range="3-5"><span class="hist-fill"></span><span
+                class="hist-lbl">3-5g</span><span class="hist-cnt">0</span></div>
+            <div class="hist-bar" data-range="5-10"><span class="hist-fill"></span><span
+                class="hist-lbl">5-10g</span><span class="hist-cnt">0</span></div>
+            <div class="hist-bar" data-range="10+"><span class="hist-fill"></span><span
+                class="hist-lbl">10+g</span><span class="hist-cnt">0</span></div>
+          </div>
+
+          <div class="kicker tiny mt-4">ASYMMETRY · L vs R</div>
+          <div class="asym-bar"><span class="asym-l" id="asymL"></span><span class="asym-r" id="asymR"></span></div>
+          <div class="asym-meta"><span id="asymLtxt">L 0</span><span id="asymRtxt">R 0</span></div>
+
+          <div class="kicker tiny mt-4">FATIGUE INDEX</div>
+          <div class="fatigue-wrap"><span class="fatigue-fill" id="fatigueFill"></span></div>
+          <div class="fatigue-meta"><span id="fatigueTxt">— · stable</span></div>
+        </div>
+      </div>
+
+      <!-- Session timeline + strike log -->
+      <div class="block strike-log">
+        <div class="block-head">
+          <div class="kicker">SESSION TIMELINE</div>
+          <span class="dim small">click a strike to inspect · click empty area to add marker</span>
+        </div>
+        <div class="timeline" id="timeline">
+          <div class="tl-track" id="tlTrack"></div>
+          <div class="tl-axis mono" id="tlAxis"></div>
+        </div>
+
+        <div class="block-head mt-4">
+          <div class="kicker">STRIKE LOG</div>
+          <div class="chip-row">
+            <button class="chip chip-on" data-filter="all">ALL</button>
+            <button class="chip" data-filter="1">LH</button>
+            <button class="chip" data-filter="2">RH</button>
+            <button class="chip" data-filter="3">LS</button>
+            <button class="chip" data-filter="4">RS</button>
+            <span class="flex-spacer"></span>
+            <button class="chip ghost" id="btnClearLog">CLEAR</button>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table class="strike-table">
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>TIME</th>
+                <th>R</th>
+                <th>SLOT</th>
+                <th>TYPE</th>
+                <th class="num">PEAK·g</th>
+                <th class="num">ω·°/s</th>
+                <th class="num">REC·ms</th>
+              </tr>
+            </thead>
+            <tbody id="strikeTbody">
+              <tr class="empty">
+                <td colspan="8">— ยังไม่มีหมัด · waiting for strikes —</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- ░░░░ RIGHT RAIL ░░░░ -->
+    <aside class="rail rail-right">
+
+      <nav class="tabs">
+        <button class="tab tab-on" data-tab="sensors">SENSORS</button>
+        <button class="tab" data-tab="library">LIBRARY</button>
+        <button class="tab" data-tab="system">SYSTEM</button>
+      </nav>
+
+      <!-- SENSORS -->
+      <section class="block tabpane on" data-pane="sensors">
+        <div class="kicker">CONNECTED NODES</div>
+        <div class="node-list" id="nodeList">
+          <div class="empty-card">— No nodes detected —<br><span class="dim">Power on a Strike Node within 2 m of the
+              Main Node.</span></div>
+        </div>
+
+        <div class="kicker mt-4">MARKERS · SESSION</div>
+        <ul class="marker-list" id="markerList">
+          <li class="dim">— no markers yet · press M during session —</li>
+        </ul>
+      </section>
+
+      <!-- LIBRARY -->
+      <section class="block tabpane" data-pane="library">
+        <div class="block-head">
+          <div class="kicker">SESSION LIBRARY · SD CARD</div>
+          <button class="chip ghost" id="btnRefreshLib" type="button">↻ REFRESH</button>
+        </div>
+        <input class="search" id="libSearch" type="search" placeholder="Search by id…">
+        <div class="lib-stats">
+          <span><span class="meta-k">TOTAL</span> <span class="mono" id="libCount">0</span></span>
+          <span><span class="meta-k">SIZE</span> <span class="mono" id="libSize">— KB</span></span>
+          <span><span class="meta-k">CARD</span> <span class="mono" id="libCard">— / —</span></span>
+        </div>
+        <div class="compare-bar">
+          <span class="meta-k">SELECTED</span>
+          <span class="mono" id="cmpCount">0</span>
+          <button class="chip ghost" id="btnCompareOpen" disabled>COMPARE</button>
+          <button class="chip ghost" id="btnCompareClear">CLEAR</button>
+        </div>
+        <div class="lib-list" id="libList">
+          <div class="empty-card">— Library empty —</div>
+        </div>
+      </section>
+
+      <!-- SYSTEM -->
+      <section class="block tabpane" data-pane="system">
+        <div class="kicker">MAIN NODE</div>
+        <table class="kv-table mono">
+          <tr>
+            <td>IP</td>
+            <td id="sysIp">192.168.4.1</td>
+          </tr>
+          <tr>
+            <td>SSID</td>
+            <td id="sysSsid">StrikeSense</td>
+          </tr>
+          <tr>
+            <td>UPTIME</td>
+            <td id="sysUp">—</td>
+          </tr>
+          <tr>
+            <td>HEAP FREE</td>
+            <td id="sysHeap">—</td>
+          </tr>
+          <tr>
+            <td>PSRAM FREE</td>
+            <td id="sysPsram">—</td>
+          </tr>
+          <tr>
+            <td>WS CLIENTS</td>
+            <td id="sysWs">0</td>
+          </tr>
+        </table>
+
+        <div class="kicker mt-4">ESP-NOW</div>
+        <table class="kv-table mono">
+          <tr>
+            <td>PACKETS RX</td>
+            <td id="sysRx">0</td>
+          </tr>
+          <tr>
+            <td>DROPPED</td>
+            <td id="sysDrop">0</td>
+          </tr>
+          <tr>
+            <td>SAMPLE RATE</td>
+            <td id="sysHz">0 Hz</td>
+          </tr>
+          <tr>
+            <td>BANDWIDTH</td>
+            <td id="sysBw">0 kbps</td>
+          </tr>
+        </table>
+
+        <div class="kicker mt-4">DETECTION TUNING</div>
+        <label class="row-inline">
+          <span class="meta-k">THRESHOLD</span>
+          <input type="range" id="thrSlider" min="1.5" max="10" step="0.1" value="3.0">
+          <span class="mono" id="thrVal">3.0 g</span>
+        </label>
+        <label class="row-inline">
+          <span class="meta-k">REFRACTORY</span>
+          <input type="range" id="refrSlider" min="100" max="800" step="10" value="250">
+          <span class="mono" id="refrVal">250 ms</span>
+        </label>
+
+        <div class="kicker mt-4">SD CARD</div>
+        <div class="bar"><span class="bar-fill" id="sdBarFill"></span></div>
+        <div class="bar-meta mono"><span id="sdUsedTxt">— used</span><span id="sdFreeTxt">— free</span></div>
+
+        <div class="kicker mt-4">ABOUT</div>
+        <table class="kv-table mono">
+          <tr>
+            <td>BUILD</td>
+            <td id="aboutBuild">—</td>
+          </tr>
+          <tr>
+            <td>UA</td>
+            <td id="aboutUa" class="ellipsis">—</td>
+          </tr>
+          <tr>
+            <td>DASHBOARD</td>
+            <td>StrikeSense v0.2</td>
+          </tr>
+        </table>
+      </section>
+
+    </aside>
+  </main>
+
+  <footer class="footbar mono">
+    <span>StrikeSense · Build <span id="buildStamp">dev</span></span>
+    <span class="flex-spacer"></span>
+    <span>Channel 1 · ESP-NOW</span>
+    <span>·</span>
+    <span id="modeTxt">LIVE</span>
+  </footer>
+
+  <!-- toast container -->
+  <div class="toast-stack" id="toast"></div>
+
+  <script type="module" src="./src/main.js"></script>
+</body>
+
+</html>
