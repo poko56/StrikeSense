@@ -256,7 +256,7 @@ async function pollNodes() {
   } catch (e) {}
 }
 
-const STALE_MS = 2500;
+const STALE_MS = 8000; // 8s — Strike Node sends status every 1s; allow up to 8 missed packets before marking stale
 
 function trackNodeHistory(nodes) {
   const now = Date.now();

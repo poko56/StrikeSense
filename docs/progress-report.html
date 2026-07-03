@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<style>
+  @page { size: A4; margin: 18mm 16mm; }
+  * { box-sizing: border-box; }
+  body {
+    font-family: "Sukhumvit Set", "Thonburi", sans-serif;
+    color: #1a1a1a; font-size: 11.5px; line-height: 1.55; margin: 0;
+  }
+  .header {
+    border-bottom: 3px solid #c0392b; padding-bottom: 14px; margin-bottom: 22px;
+  }
+  .brand { font-size: 26px; font-weight: 800; letter-spacing: .5px; color: #c0392b; }
+  .subtitle { font-size: 13px; color: #555; margin-top: 4px; }
+  .meta { font-size: 10px; color: #888; margin-top: 8px; }
+  h2 {
+    font-size: 14px; color: #c0392b; margin: 22px 0 10px;
+    border-left: 4px solid #c0392b; padding-left: 9px;
+  }
+  table { width: 100%; border-collapse: collapse; margin: 8px 0 4px; }
+  th, td { border: 1px solid #ddd; padding: 6px 9px; text-align: left; vertical-align: top; }
+  th { background: #f5e9e7; font-weight: 700; color: #7b241c; }
+  tr:nth-child(even) td { background: #fafafa; }
+  .progress-wrap { background: #eee; border-radius: 6px; height: 22px; overflow: hidden; margin: 6px 0; position: relative; }
+  .progress-bar { background: linear-gradient(90deg,#c0392b,#e74c3c); height: 100%; width: 85%; }
+  .progress-label { position: absolute; right: 10px; top: 2px; font-size: 11px; font-weight: 700; color: #fff; }
+  ul { margin: 6px 0; padding-left: 20px; }
+  li { margin: 3px 0; }
+  .ok { color: #1e8449; font-weight: 700; }
+  .wip { color: #b9770e; font-weight: 700; }
+  .note { background: #fdf6e3; border-left: 4px solid #d4a017; padding: 9px 12px; font-size: 10.5px; margin-top: 6px; }
+  .footer { margin-top: 26px; padding-top: 10px; border-top: 1px solid #ddd; font-size: 9.5px; color: #999; text-align: center; }
+  .badge { display:inline-block; background:#c0392b; color:#fff; font-size:9px; padding:1px 7px; border-radius:3px; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="brand">STRIKESENSE</div>
+  <div class="subtitle">รายงานความคืบหน้าโครงการ · ระบบเซ็นเซอร์วัดและวิเคราะห์การฝึกมวยไทย</div>
+  <div class="meta">IoT Muay Thai Telemetry System &nbsp;|&nbsp; รายงานวันที่ 4 มิถุนายน 2569</div>
+</div>
+
+<h2>1. ภาพรวมโครงการ</h2>
+<p>ระบบติดตามและวิเคราะห์การฝึกซ้อมมวยไทยแบบเรียลไทม์ ประกอบด้วยอุปกรณ์เซ็นเซอร์สวมใส่ที่ข้อมือและแข้งของนักกีฬา
+ส่งข้อมูลการเคลื่อนไหวแบบไร้สายมายังตัวรับกลาง พร้อมแสดงผลและวิเคราะห์สถิติบนหน้าเว็บแดชบอร์ด</p>
+<table>
+  <tr><th style="width:25%">องค์ประกอบ</th><th>หน้าที่</th></tr>
+  <tr><td>Strike Node</td><td>อุปกรณ์สวมใส่ — วัดแรงและการเคลื่อนไหว 400 ครั้ง/วินาที</td></tr>
+  <tr><td>Main Node</td><td>ตัวรับสัญญาณไร้สาย + เซิร์ฟเวอร์แดชบอร์ด + บันทึกข้อมูลลง SD card</td></tr>
+  <tr><td>Dashboard</td><td>หน้าเว็บแสดงผลและวิเคราะห์สถิติการฝึกแบบเรียลไทม์</td></tr>
+</table>
+
+<h2>2. ความคืบหน้าโดยรวม</h2>
+<div class="progress-wrap"><div class="progress-bar"></div><span class="progress-label">~85%</span></div>
+<table>
+  <tr><th style="width:45%">ส่วนงาน</th><th style="width:20%">ความคืบหน้า</th><th>สถานะ</th></tr>
+  <tr><td>ระบบเซ็นเซอร์ + เฟิร์มแวร์</td><td>90%</td><td class="ok">ใช้งานได้</td></tr>
+  <tr><td>ระบบรับส่งข้อมูลไร้สาย</td><td>95%</td><td class="ok">เสถียร</td></tr>
+  <tr><td>หน้าเว็บแดชบอร์ด</td><td>95%</td><td class="ok">ครบฟังก์ชัน</td></tr>
+  <tr><td>ระบบจัดการพลังงาน/แบตเตอรี่</td><td>70%</td><td class="wip">กำลังดำเนินการ</td></tr>
+  <tr><td>การประกอบภาคสนาม</td><td>30%</td><td class="wip">เริ่มดำเนินการ</td></tr>
+</table>
+
+<h2>3. งานที่เสร็จสมบูรณ์</h2>
+<p><strong>ฮาร์ดแวร์ &amp; เฟิร์มแวร์</strong></p>
+<ul>
+  <li><span class="ok">✓</span> เซ็นเซอร์ตรวจวัดการเคลื่อนไหว (ความเร่ง + การหมุน) ความเร็ว 400Hz</li>
+  <li><span class="ok">✓</span> ส่งข้อมูลไร้สายเสถียร — แก้ปัญหาสัญญาณหลุดเรียบร้อย</li>
+  <li><span class="ok">✓</span> ระบบชาร์จอัตโนมัติ — เสียบชาร์จพักการทำงานเอง ถอดแล้วกลับมาทำงานทันที</li>
+  <li><span class="ok">✓</span> ระบบป้องกันแบตเตอรี่เสื่อม (ตัดไฟเมื่อแบตต่ำ)</li>
+</ul>
+<p><strong>หน้าเว็บแดชบอร์ด</strong></p>
+<ul>
+  <li><span class="ok">✓</span> แสดงข้อมูลแรงปะทะแบบเรียลไทม์พร้อมกราฟ</li>
+  <li><span class="ok">✓</span> จำแนกประเภทหมัด/เตะ (หมัดตรง, ฮุก, อัปเปอร์คัต, เตะ, เข่า ฯลฯ)</li>
+  <li><span class="ok">✓</span> สถิติการฝึกกว่า 20 รายการ (ความถี่หมัด, แรงสูงสุด, ความสมดุลซ้าย-ขวา, ระดับความล้า)</li>
+  <li><span class="ok">✓</span> จับเวลายกแบบมวย + บันทึกอัตโนมัติตามรอบ</li>
+  <li><span class="ok">✓</span> แผนภาพร่างกายแสดงจุดที่โดนตี (heatmap)</li>
+  <li><span class="ok">✓</span> ระบบปรับเทียบเซ็นเซอร์ (Calibration) ทั้งรายจุดและทั้งตัว</li>
+  <li><span class="ok">✓</span> คลังบันทึกเซสชัน (ดู / ดาวน์โหลด / เปรียบเทียบ)</li>
+</ul>
+
+<h2>4. งานที่กำลังดำเนินการ</h2>
+<table>
+  <tr><th style="width:75%">รายการ</th><th>ความคืบหน้า</th></tr>
+  <tr><td>ระบบวัดเปอร์เซ็นต์แบตเตอรี่ (เขียนโปรแกรมเสร็จ รอต่อวงจร)</td><td>70%</td></tr>
+  <tr><td>ประกอบต้นแบบบนแผ่นวงจรสำหรับทดสอบภาคสนาม</td><td>30%</td></tr>
+  <tr><td>ออกแบบกล่อง/เคสสำหรับสวมใส่จริง</td><td>เริ่มต้น</td></tr>
+</table>
+
+<h2>5. แผนงานขั้นถัดไป</h2>
+<table>
+  <tr><th style="width:8%">ลำดับ</th><th>งาน</th><th style="width:25%">ระยะเวลาประมาณ</th></tr>
+  <tr><td>1</td><td>ประกอบต้นแบบ 1 ชุด + ทดสอบครบทุกฟังก์ชัน</td><td>1 สัปดาห์</td></tr>
+  <tr><td>2</td><td>ทดสอบใช้งานจริงในยิม (Field Test)</td><td>1–2 สัปดาห์</td></tr>
+  <tr><td>3</td><td>ปรับแก้จากผลทดสอบ + ประกอบครบ 4 จุด</td><td>1 สัปดาห์</td></tr>
+  <tr><td>4</td><td>ผลิตแผ่นวงจร PCB เวอร์ชันสมบูรณ์</td><td>2–3 สัปดาห์</td></tr>
+</table>
+
+<h2>6. หมายเหตุ</h2>
+<div class="note">
+  • ส่วนการวิเคราะห์ด้วย AI อยู่ในความรับผิดชอบของทีม AI แยกต่างหาก โดยระบบนี้ได้เตรียมข้อมูลดิบ (Raw Data) ในรูปแบบที่พร้อมส่งต่อให้แล้ว<br>
+  • ระบบบันทึกข้อมูลลง SD card ในรูปแบบ CSV สำหรับการวิเคราะห์เชิงลึกภายหลัง
+</div>
+
+<div class="footer">
+  StrikeSense Project &nbsp;·&nbsp; เอกสารรายงานความคืบหน้า &nbsp;·&nbsp; หน้า 1/1
+</div>
+
+</body>
+</html>

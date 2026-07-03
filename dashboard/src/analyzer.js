@@ -47,7 +47,7 @@ export function ingestBatch({ slot, rssi, mac, samples, seq, recvMs }) {
 
   // Calibration mode: collect raw samples, skip detection so the user can hold still
   if (isCalibrating(slot)) {
-    for (const s of samples) collectSample(s);
+    for (const s of samples) collectSample(slot, s);
     scheduleRender();
     return;
   }

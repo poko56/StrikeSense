@@ -8,7 +8,7 @@ import {
 } from './analyzer.js';
 import { api } from './api.js';
 import { openModal, closeModal } from './modal.js';
-import { startCalibration, abortCalibration, clearCalibration, clearAllCalibration } from './calibrate.js';
+import { startCalibration, startCalibrationFor, abortCalibration, clearCalibration, clearAllCalibration, isCalibratingAny } from './calibrate.js';
 
 const $ = id => document.getElementById(id);
 
@@ -418,7 +418,7 @@ function renderNodes() {
     const qCls = quality >= 70 ? 'q-good' : quality >= 40 ? 'q-fair' : 'q-poor';
 
     const cal = state.calibration.offsets.get(n.slot);
-    const isCalibrating = state.calibration.active === n.slot;
+    const isCalibrating = state.calibration.activeSlots.has(n.slot);
 
     return `
       <div class="${cls}" data-mac="${n.mac}">
@@ -538,84 +538,380 @@ function drawRxSparkline(cv, hist) {
 }
 
 // ───── CALIBRATION MODAL ─────
+// SVG illustration for calibration guide (hand vs shin variants)
+function calGuideSvg(slot) {
+  const isHand = slot === 1 || slot === 2;
+  const label  = isHand ? 'WRIST / GLOVE SENSOR' : 'SHIN SENSOR';
+  const color  = 'var(--accent)';
+  return isHand ? `
+  <svg viewBox="0 0 400 300" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:100%;display:block">
+    <rect width="400" height="300" fill="var(--bg2)"/>
+    <!-- table surface -->
+    <rect x="40" y="210" width="320" height="8" rx="2" fill="var(--border)"/>
+    <line x1="40" y1="218" x2="40" y2="270" stroke="var(--border)" stroke-width="2"/>
+    <line x1="360" y1="218" x2="360" y2="270" stroke="var(--border)" stroke-width="2"/>
+    <!-- arm silhouette -->
+    <rect x="130" y="155" width="140" height="58" rx="29" fill="var(--bg3)" stroke="var(--border)" stroke-width="1.5"/>
+    <!-- sensor box on wrist -->
+    <rect x="178" y="140" width="44" height="28" rx="5" fill="${color}" opacity="0.9"/>
+    <rect x="183" y="145" width="34" height="18" rx="3" fill="var(--bg)" opacity="0.4"/>
+    <!-- sensor label -->
+    <text x="200" y="157" text-anchor="middle" font-size="8" fill="var(--bg)" font-family="monospace" font-weight="bold">IMU</text>
+    <!-- wrist text -->
+    <text x="200" y="228" text-anchor="middle" font-size="11" fill="var(--fg2)" font-family="monospace">${label}</text>
+    <!-- ✓ hold still icons -->
+    <g transform="translate(64,100)">
+      <circle cx="0" cy="0" r="18" fill="none" stroke="var(--ok)" stroke-width="2"/>
+      <line x1="-7" y1="0" x2="-2" y2="6" stroke="var(--ok)" stroke-width="2.5" stroke-linecap="round"/>
+      <line x1="-2" y1="6" x2="8" y2="-5" stroke="var(--ok)" stroke-width="2.5" stroke-linecap="round"/>
+      <text x="0" y="35" text-anchor="middle" font-size="9" fill="var(--ok)" font-family="monospace">FLAT</text>
+    </g>
+    <!-- ✗ no move icons -->
+    <g transform="translate(336,100)">
+      <circle cx="0" cy="0" r="18" fill="none" stroke="var(--warn)" stroke-width="2"/>
+      <line x1="-7" y1="-7" x2="7" y2="7" stroke="var(--warn)" stroke-width="2.5" stroke-linecap="round"/>
+      <line x1="7" y1="-7" x2="-7" y2="7" stroke="var(--warn)" stroke-width="2.5" stroke-linecap="round"/>
+      <text x="0" y="35" text-anchor="middle" font-size="9" fill="var(--warn)" font-family="monospace">NO MOVE</text>
+    </g>
+    <!-- title -->
+    <text x="200" y="36" text-anchor="middle" font-size="13" fill="var(--fg)" font-family="monospace" font-weight="bold" letter-spacing="2">CALIBRATION POSTURE</text>
+    <text x="200" y="56" text-anchor="middle" font-size="10" fill="var(--fg2)" font-family="monospace">Place arm flat · sensor facing up · stay still 5 sec</text>
+  </svg>` : `
+  <svg viewBox="0 0 400 300" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:100%;display:block">
+    <rect width="400" height="300" fill="var(--bg2)"/>
+    <!-- floor -->
+    <rect x="40" y="240" width="320" height="8" rx="2" fill="var(--border)"/>
+    <!-- leg silhouette -->
+    <rect x="160" y="80" width="80" height="165" rx="18" fill="var(--bg3)" stroke="var(--border)" stroke-width="1.5"/>
+    <!-- sensor on shin -->
+    <rect x="168" y="130" width="64" height="36" rx="5" fill="${color}" opacity="0.9"/>
+    <rect x="174" y="136" width="52" height="24" rx="3" fill="var(--bg)" opacity="0.4"/>
+    <text x="200" y="152" text-anchor="middle" font-size="8" fill="var(--bg)" font-family="monospace" font-weight="bold">IMU</text>
+    <text x="200" y="262" text-anchor="middle" font-size="11" fill="var(--fg2)" font-family="monospace">${label}</text>
+    <!-- ✓ -->
+    <g transform="translate(64,140)">
+      <circle cx="0" cy="0" r="18" fill="none" stroke="var(--ok)" stroke-width="2"/>
+      <line x1="-7" y1="0" x2="-2" y2="6" stroke="var(--ok)" stroke-width="2.5" stroke-linecap="round"/>
+      <line x1="-2" y1="6" x2="8" y2="-5" stroke="var(--ok)" stroke-width="2.5" stroke-linecap="round"/>
+      <text x="0" y="35" text-anchor="middle" font-size="9" fill="var(--ok)" font-family="monospace">VERTICAL</text>
+    </g>
+    <!-- ✗ -->
+    <g transform="translate(336,140)">
+      <circle cx="0" cy="0" r="18" fill="none" stroke="var(--warn)" stroke-width="2"/>
+      <line x1="-7" y1="-7" x2="7" y2="7" stroke="var(--warn)" stroke-width="2.5" stroke-linecap="round"/>
+      <line x1="7" y1="-7" x2="-7" y2="7" stroke="var(--warn)" stroke-width="2.5" stroke-linecap="round"/>
+      <text x="0" y="35" text-anchor="middle" font-size="9" fill="var(--warn)" font-family="monospace">NO MOVE</text>
+    </g>
+    <text x="200" y="36" text-anchor="middle" font-size="13" fill="var(--fg)" font-family="monospace" font-weight="bold" letter-spacing="2">CALIBRATION POSTURE</text>
+    <text x="200" y="56" text-anchor="middle" font-size="10" fill="var(--fg2)" font-family="monospace">Stand straight · shin vertical · stay still 5 sec</text>
+  </svg>`;
+}
+
 function openCalibrationModal(slot, mac) {
   if (!slot || slot === 0) { toast('Assign a slot first', 'warn'); return; }
-  if (state.calibration.active) { toast('Already calibrating another slot', 'warn'); return; }
+  if (isCalibratingAny()) { toast('Already calibrating', 'warn'); return; }
 
   const dur = 5000;
+  const isHand = slot === 1 || slot === 2;
+
+  // ── STEP 1: Guide ──────────────────────────────────────────
   const body = openModal(`
     <div class="dlg-head">
-      <div class="dlg-title">CALIBRATE · ${SLOT_NAMES[slot]}</div>
+      <div class="dlg-title">HOW TO CALIBRATE · ${SLOT_NAMES[slot]}</div>
       <button class="dlg-x" id="dlgCancel">✕</button>
     </div>
-    <div class="cal-stage">
-      <p class="cal-instr">
-        Place the node on a <strong>flat, level surface</strong> with the gravity axis pointing up.
-        Hold completely still for 5 seconds.
-      </p>
-      <div class="cal-count" id="calCount">5.0</div>
-      <div class="cal-bar"><span class="cal-fill" id="calFill"></span></div>
-      <div class="cal-stats mono">
-        <span>Samples: <b id="calSamp">0</b></span>
-        <span>Slot: <b>${SLOT_NAMES[slot]} (${mac?.slice(-5) || '—'})</b></span>
+    <div class="cal-guide">
+      <div class="cal-guide-img" id="calGuideImg">
+        <img
+          src="${isHand ? '/images/cal/cal-hand.jpg' : '/images/cal/cal-shin.jpg'}"
+          alt="Calibration posture guide"
+          style="width:100%;height:100%;object-fit:cover;object-position:center"
+          onerror="this.style.display='none';this.nextElementSibling.style.display='block'"
+        >
+        <div style="display:none;position:absolute;inset:0">${calGuideSvg(slot)}</div>
       </div>
-      <div class="cal-note dim">Dashboard-side only · CSV on SD will still contain raw values.</div>
+      <ol class="cal-steps">
+        <li>
+          <span class="cal-step-num">1</span>
+          <div>
+            <strong>สวมเซ็นเซอร์ให้เรียบร้อย</strong>
+            <span class="dim">ให้แน่น ไม่หลวม ตำแหน่งเหมือนจะใช้งานจริง</span>
+          </div>
+        </li>
+        <li>
+          <span class="cal-step-num">2</span>
+          <div>
+            <strong>${isHand ? 'วางแขนลงบนพื้นราบ' : 'ยืนตรง ขาแนบข้างลำตัว'}</strong>
+            <span class="dim">${isHand ? 'หงายมือขึ้น เซ็นเซอร์หันขึ้น อย่าหมุนข้อมือ' : 'ยืนนิ่ง แข้งตั้งฉาก ไม่โยกตัว'}</span>
+          </div>
+        </li>
+        <li>
+          <span class="cal-step-num">3</span>
+          <div>
+            <strong>กด START และ อย่าขยับ 5 วินาที</strong>
+            <span class="dim">Dashboard จะเก็บ sample อัตโนมัติ แล้วคำนวณ offset ให้</span>
+          </div>
+        </li>
+      </ol>
+      <div class="cal-note dim" style="margin-top:8px">⚠ Dashboard-side only · ไฟล์ CSV บน SD ยังเป็น raw values</div>
     </div>
     <div class="dlg-actions">
-      <button class="dlg-btn" id="dlgAbort">ABORT</button>
+      <button class="dlg-btn" id="dlgCancel2">CANCEL</button>
+      <button class="dlg-btn primary" id="dlgStartCal">START CAL ›</button>
     </div>
   `);
 
-  const fill  = document.getElementById('calFill');
-  const count = document.getElementById('calCount');
-  const samp  = document.getElementById('calSamp');
+  document.getElementById('dlgCancel').addEventListener('click', closeModal);
+  document.getElementById('dlgCancel2').addEventListener('click', closeModal);
 
-  const controller = startCalibration(slot, mac, dur, (elapsed, n) => {
-    const pct = Math.min(100, (elapsed / dur) * 100);
-    fill.style.width  = pct + '%';
-    count.textContent = Math.max(0, (dur - elapsed) / 1000).toFixed(1);
-    samp.textContent  = n;
-  });
-
-  function abort() { controller.abort(); closeModal(); }
-  document.getElementById('dlgCancel').addEventListener('click', abort);
-  document.getElementById('dlgAbort').addEventListener('click', abort);
-
-  controller.promise.then(res => {
-    const o = res.offset;
+  document.getElementById('dlgStartCal').addEventListener('click', () => {
+    // ── STEP 2: Countdown ──────────────────────────────────────
     body.innerHTML = `
       <div class="dlg-head">
-        <div class="dlg-title">✓ CALIBRATED · ${SLOT_NAMES[slot]}</div>
-        <button class="dlg-x" onclick="document.getElementById('appDialog').close()">✕</button>
+        <div class="dlg-title">CALIBRATING · ${SLOT_NAMES[slot]}</div>
+        <button class="dlg-x" id="dlgAbortX">✕</button>
       </div>
-      <table class="cmp-table">
-        <thead><tr><th>Axis</th><th>Offset</th></tr></thead>
+      <div class="cal-stage">
+        <p class="cal-instr">
+          ${isHand ? '📌 วางแขนนิ่ง · เซ็นเซอร์หันขึ้น' : '📌 ยืนตรงนิ่ง · แข้งตั้งฉาก'}<br>
+          <strong>อย่าขยับจนกว่าจะเสร็จ</strong>
+        </p>
+        <div class="cal-count" id="calCount">5.0</div>
+        <div class="cal-bar"><span class="cal-fill" id="calFill"></span></div>
+        <div class="cal-stats mono">
+          <span>Samples: <b id="calSamp">0</b></span>
+          <span>Slot: <b>${SLOT_NAMES[slot]} · ${mac?.slice(-5) || '—'}</b></span>
+        </div>
+      </div>
+      <div class="dlg-actions">
+        <button class="dlg-btn" id="dlgAbort">ABORT</button>
+      </div>`;
+
+    const fill  = document.getElementById('calFill');
+    const count = document.getElementById('calCount');
+    const samp  = document.getElementById('calSamp');
+
+    const controller = startCalibration(slot, mac, dur, (elapsed, n) => {
+      const pct = Math.min(100, (elapsed / dur) * 100);
+      fill.style.width  = pct + '%';
+      count.textContent = Math.max(0, (dur - elapsed) / 1000).toFixed(1);
+      samp.textContent  = n;
+    });
+
+    function abort() { controller.abort(); closeModal(); }
+    document.getElementById('dlgAbortX').addEventListener('click', abort);
+    document.getElementById('dlgAbort').addEventListener('click', abort);
+
+    controller.promise.then(res => {
+      const o = res.offset;
+      // ── STEP 3: Result ──────────────────────────────────────
+      body.innerHTML = `
+        <div class="dlg-head">
+          <div class="dlg-title">✓ CALIBRATED · ${SLOT_NAMES[slot]}</div>
+          <button class="dlg-x" onclick="document.getElementById('appDialog').close()">✕</button>
+        </div>
+        <div class="cal-result-ok">✓</div>
+        <table class="cmp-table" style="margin-top:8px">
+          <thead><tr><th>Axis</th><th>Offset</th><th></th></tr></thead>
+          <tbody>
+            <tr><td>aX</td><td class="mono">${o.ax.toFixed(4)} g</td><td class="dim small">roll bias</td></tr>
+            <tr><td>aY</td><td class="mono">${o.ay.toFixed(4)} g</td><td class="dim small">pitch bias</td></tr>
+            <tr><td>aZ</td><td class="mono">${o.az.toFixed(4)} g</td><td class="dim small">gravity − 1g</td></tr>
+            <tr><td>gX</td><td class="mono">${o.gx.toFixed(2)} °/s</td><td class="dim small">gyro bias</td></tr>
+            <tr><td>gY</td><td class="mono">${o.gy.toFixed(2)} °/s</td><td class="dim small">gyro bias</td></tr>
+            <tr><td>gZ</td><td class="mono">${o.gz.toFixed(2)} °/s</td><td class="dim small">gyro bias</td></tr>
+          </tbody>
+        </table>
+        <div class="cal-note dim mt-4">Saved · ${res.samples} samples · applied immediately</div>
+        <div class="dlg-actions">
+          <button class="dlg-btn primary" onclick="document.getElementById('appDialog').close()">DONE</button>
+        </div>`;
+      toast(`✓ Calibrated ${SLOT_NAMES[slot]} · ${res.samples} samples`, 'ok');
+    }).catch(err => {
+      body.innerHTML = `
+        <div class="dlg-head">
+          <div class="dlg-title">✕ FAILED · ${SLOT_NAMES[slot]}</div>
+          <button class="dlg-x" onclick="document.getElementById('appDialog').close()">✕</button>
+        </div>
+        <div class="cal-note warn">${err.message}</div>
+        <div class="dlg-actions">
+          <button class="dlg-btn" onclick="document.getElementById('appDialog').close()">CLOSE</button>
+        </div>`;
+      toast(`Calibration failed: ${err.message}`, 'warn');
+    });
+  });
+}
+
+// ───── CALIBRATE ALL (whole body) ─────
+function openCalibrateAllModal() {
+  if (isCalibratingAny()) { toast('Already calibrating', 'warn'); return; }
+
+  // collect every live, assigned node (one per slot)
+  const seen = new Set();
+  const targets = [];
+  for (const n of state.nodes) {
+    if (!n.slot || n.slot === 0) continue;
+    if (seen.has(n.slot)) continue;
+    if ((n.ageMs || 0) > 3000) continue;     // skip stale nodes
+    seen.add(n.slot);
+    targets.push({ slot: n.slot, mac: n.mac });
+  }
+  targets.sort((a, b) => a.slot - b.slot);
+
+  if (!targets.length) {
+    toast('No live, assigned nodes to calibrate', 'warn');
+    return;
+  }
+
+  const dur = 5000;
+
+  // ── STEP 1: posture guide ──
+  const body = openModal(`
+    <div class="dlg-head">
+      <div class="dlg-title">CALIBRATE WHOLE BODY · ${targets.length} NODES</div>
+      <button class="dlg-x" id="dlgCancel">✕</button>
+    </div>
+    <div class="cal-guide">
+      <div class="cal-guide-img">
+        ${calBodySvg()}
+      </div>
+      <ol class="cal-steps">
+        <li><span class="cal-step-num">1</span><div>
+          <strong>ใส่เซ็นเซอร์ครบทุกจุด</strong>
+          <span class="dim">มือซ้าย/ขวา · แข้งซ้าย/ขวา — ให้แน่นทุกตัว</span>
+        </div></li>
+        <li><span class="cal-step-num">2</span><div>
+          <strong>ยืนตรงในท่า "พร้อม" (neutral stance)</strong>
+          <span class="dim">เท้าชิด · แขนปล่อยแนบลำตัว · กำหมัดเบาๆ หันหน้าเข้าหากล้อง</span>
+        </div></li>
+        <li><span class="cal-step-num">3</span><div>
+          <strong>ยืนนิ่งสนิท 5 วินาที</strong>
+          <span class="dim">อย่าขยับ อย่าหมุนข้อมือ อย่าโยกตัว — ระบบจับแกนแรงโน้มถ่วงให้เอง</span>
+        </div></li>
+      </ol>
+      <div class="cal-targets mono">
+        ${targets.map(t => `<span class="cal-target-chip">${SLOT_NAMES[t.slot]} · ${t.mac.slice(-5)}</span>`).join('')}
+      </div>
+      <div class="cal-note dim">⚠ ท่าไหนก็ได้ ขอแค่ <strong>นิ่งสนิท</strong> — ระบบตรวจจับทิศแรงโน้มถ่วงอัตโนมัติ</div>
+    </div>
+    <div class="dlg-actions">
+      <button class="dlg-btn" id="dlgCancel2">CANCEL</button>
+      <button class="dlg-btn primary" id="dlgStartAll">START · ${targets.length} NODES ›</button>
+    </div>
+  `);
+
+  document.getElementById('dlgCancel').addEventListener('click', closeModal);
+  document.getElementById('dlgCancel2').addEventListener('click', closeModal);
+
+  document.getElementById('dlgStartAll').addEventListener('click', () => {
+    // ── STEP 2: countdown + per-node sample counters ──
+    body.innerHTML = `
+      <div class="dlg-head">
+        <div class="dlg-title">CALIBRATING · ${targets.length} NODES</div>
+        <button class="dlg-x" id="dlgAbortX">✕</button>
+      </div>
+      <div class="cal-stage">
+        <p class="cal-instr">📌 ยืนนิ่งสนิท · <strong>อย่าขยับจนกว่าจะเสร็จ</strong></p>
+        <div class="cal-count" id="calCount">5.0</div>
+        <div class="cal-bar"><span class="cal-fill" id="calFill"></span></div>
+      </div>
+      <table class="cmp-table mt-4">
+        <thead><tr><th>Slot</th><th>Node</th><th>Samples</th></tr></thead>
         <tbody>
-          <tr><td>aX</td><td>${o.ax.toFixed(4)} g</td></tr>
-          <tr><td>aY</td><td>${o.ay.toFixed(4)} g</td></tr>
-          <tr><td>aZ</td><td>${o.az.toFixed(4)} g <span class="dim small">(− 1g gravity)</span></td></tr>
-          <tr><td>gX</td><td>${o.gx.toFixed(2)} °/s</td></tr>
-          <tr><td>gY</td><td>${o.gy.toFixed(2)} °/s</td></tr>
-          <tr><td>gZ</td><td>${o.gz.toFixed(2)} °/s</td></tr>
+          ${targets.map(t => `
+            <tr id="calRow-${t.slot}">
+              <td>${SLOT_NAMES[t.slot]}</td>
+              <td class="mono dim">${t.mac.slice(-5)}</td>
+              <td class="mono" id="calCnt-${t.slot}">0</td>
+            </tr>`).join('')}
         </tbody>
       </table>
-      <div class="cal-note dim mt-4">Saved · ${res.samples} samples · applied to dashboard view immediately.</div>
       <div class="dlg-actions">
-        <button class="dlg-btn primary" onclick="document.getElementById('appDialog').close()">OK</button>
+        <button class="dlg-btn" id="dlgAbort">ABORT</button>
       </div>`;
-    toast(`Calibrated ${SLOT_NAMES[slot]} · ${res.samples} samples`, 'ok');
-  }).catch(err => {
-    body.innerHTML = `
-      <div class="dlg-head">
-        <div class="dlg-title">✕ CALIBRATION FAILED</div>
-        <button class="dlg-x" onclick="document.getElementById('appDialog').close()">✕</button>
-      </div>
-      <div class="cal-note">${err.message}</div>
-      <div class="dlg-actions">
-        <button class="dlg-btn" onclick="document.getElementById('appDialog').close()">CLOSE</button>
-      </div>`;
-    toast(`Calibration failed: ${err.message}`, 'warn');
+
+    const fill  = document.getElementById('calFill');
+    const count = document.getElementById('calCount');
+
+    const controller = startCalibrationFor(targets, dur, (elapsed, counts) => {
+      const pct = Math.min(100, (elapsed / dur) * 100);
+      fill.style.width  = pct + '%';
+      count.textContent = Math.max(0, (dur - elapsed) / 1000).toFixed(1);
+      for (const [slot, c] of counts) {
+        const el = document.getElementById(`calCnt-${slot}`);
+        if (el) el.textContent = c;
+      }
+    });
+
+    function abort() { controller.abort(); closeModal(); }
+    document.getElementById('dlgAbortX').addEventListener('click', abort);
+    document.getElementById('dlgAbort').addEventListener('click', abort);
+
+    controller.promise.then(({ results, failed }) => {
+      // ── STEP 3: summary ──
+      const rows = targets.map(t => {
+        const r = results.get(t.slot);
+        if (r) {
+          return `<tr><td>${SLOT_NAMES[t.slot]}</td><td class="mono">${r.samples}</td>
+            <td class="dim small">grav ${r.offset.gravityAxis}</td><td style="color:var(--ok)">✓</td></tr>`;
+        }
+        const f = failed.find(x => x.slot === t.slot);
+        return `<tr><td>${SLOT_NAMES[t.slot]}</td><td class="mono dim">${f ? f.reason : '—'}</td>
+          <td></td><td style="color:var(--warn)">✕</td></tr>`;
+      }).join('');
+
+      body.innerHTML = `
+        <div class="dlg-head">
+          <div class="dlg-title">✓ CALIBRATION DONE · ${results.size}/${targets.length}</div>
+          <button class="dlg-x" onclick="document.getElementById('appDialog').close()">✕</button>
+        </div>
+        <table class="cmp-table">
+          <thead><tr><th>Slot</th><th>Samples</th><th>Axis</th><th></th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+        <div class="cal-note dim mt-4">Applied to dashboard view immediately · CSV on SD stays raw</div>
+        <div class="dlg-actions">
+          <button class="dlg-btn primary" onclick="document.getElementById('appDialog').close()">DONE</button>
+        </div>`;
+      if (results.size === targets.length) toast(`✓ Calibrated all ${results.size} nodes`, 'ok');
+      else toast(`Calibrated ${results.size}/${targets.length} · ${failed.length} failed`, 'warn');
+    });
   });
+}
+
+// Whole-body posture illustration (front view, 4 sensor dots)
+function calBodySvg() {
+  return `
+  <svg viewBox="0 0 400 300" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:100%;display:block">
+    <rect width="400" height="300" fill="var(--bg2)"/>
+    <text x="200" y="28" text-anchor="middle" font-size="13" fill="var(--fg)" font-family="monospace" font-weight="bold" letter-spacing="2">WHOLE-BODY CALIBRATION</text>
+    <text x="200" y="46" text-anchor="middle" font-size="9.5" fill="var(--fg2)" font-family="monospace">Stand still in a neutral stance · 5 sec</text>
+    <!-- floor -->
+    <line x1="120" y1="280" x2="280" y2="280" stroke="var(--border)" stroke-width="2"/>
+    <!-- body: head -->
+    <circle cx="200" cy="78" r="16" fill="var(--bg3)" stroke="var(--border)" stroke-width="1.5"/>
+    <!-- torso -->
+    <rect x="184" y="96" width="32" height="74" rx="10" fill="var(--bg3)" stroke="var(--border)" stroke-width="1.5"/>
+    <!-- arms down -->
+    <rect x="160" y="100" width="14" height="74" rx="7" fill="var(--bg3)" stroke="var(--border)" stroke-width="1.5"/>
+    <rect x="226" y="100" width="14" height="74" rx="7" fill="var(--bg3)" stroke="var(--border)" stroke-width="1.5"/>
+    <!-- legs -->
+    <rect x="186" y="172" width="13" height="104" rx="6" fill="var(--bg3)" stroke="var(--border)" stroke-width="1.5"/>
+    <rect x="201" y="172" width="13" height="104" rx="6" fill="var(--bg3)" stroke="var(--border)" stroke-width="1.5"/>
+    <!-- sensor dots: hands -->
+    <circle cx="167" cy="178" r="9" fill="var(--accent)"/><text x="167" y="181" text-anchor="middle" font-size="8" fill="var(--bg)" font-family="monospace" font-weight="bold">LH</text>
+    <circle cx="233" cy="178" r="9" fill="var(--accent)"/><text x="233" y="181" text-anchor="middle" font-size="8" fill="var(--bg)" font-family="monospace" font-weight="bold">RH</text>
+    <!-- sensor dots: shins -->
+    <circle cx="192" cy="240" r="9" fill="var(--accent)"/><text x="192" y="243" text-anchor="middle" font-size="8" fill="var(--bg)" font-family="monospace" font-weight="bold">LS</text>
+    <circle cx="208" cy="240" r="9" fill="var(--accent)"/><text x="208" y="243" text-anchor="middle" font-size="8" fill="var(--bg)" font-family="monospace" font-weight="bold">RS</text>
+    <!-- hold still badge -->
+    <g transform="translate(330,150)">
+      <circle cx="0" cy="0" r="20" fill="none" stroke="var(--ok)" stroke-width="2"/>
+      <line x1="-8" y1="0" x2="-2" y2="7" stroke="var(--ok)" stroke-width="3" stroke-linecap="round"/>
+      <line x1="-2" y1="7" x2="9" y2="-6" stroke="var(--ok)" stroke-width="3" stroke-linecap="round"/>
+      <text x="0" y="38" text-anchor="middle" font-size="9" fill="var(--ok)" font-family="monospace">HOLD STILL</text>
+    </g>
+  </svg>`;
 }
 
 // ───── NODE HISTORY MODAL ─────
@@ -1047,6 +1343,7 @@ export function initUi() {
   setupLibrarySearch();
   $('btnEditGoals')?.addEventListener('click', openGoalsModal);
   $('btnHelp')?.addEventListener('click', openShortcutsModal);
+  $('btnCalAll')?.addEventListener('click', openCalibrateAllModal);
   $('buildStamp').textContent = new Date().toISOString().slice(0,10).replace(/-/g,'');
 }
 

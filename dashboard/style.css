@@ -1036,7 +1036,92 @@ input:focus-visible, select:focus-visible, button:focus-visible {
 .nc-actions .ico-btn { font-size: 9.5px; padding: 4px 8px; }
 .nc-actions .ico-btn[disabled] { opacity: .4; cursor: not-allowed; }
 
-/* ──────── CALIBRATION MODAL ──────── */
+/* ──────── CALIBRATE-ALL master button ──────── */
+.sensors-head {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 10px; margin-bottom: 8px;
+}
+.cal-all-btn {
+  flex-shrink: 0;
+  padding: 6px 12px;
+  background: var(--blood);
+  color: #fff;
+  border: 1px solid var(--blood-bright);
+  border-radius: 3px;
+  font: 700 10px var(--f-display);
+  letter-spacing: .1em;
+  cursor: pointer;
+  transition: background .12s, transform .06s;
+}
+.cal-all-btn:hover  { background: var(--blood-bright); }
+.cal-all-btn:active { transform: translateY(1px); }
+
+.cal-targets {
+  display: flex; flex-wrap: wrap; gap: 6px;
+  margin: 2px 0;
+}
+.cal-target-chip {
+  padding: 3px 8px;
+  background: var(--ink-2);
+  border: 1px solid var(--rule);
+  border-radius: 2px;
+  font-size: 10.5px; color: var(--paper-2);
+}
+
+/* ──────── CALIBRATION GUIDE (Step 1) ──────── */
+.cal-guide {
+  display: flex; flex-direction: column; gap: 14px;
+}
+
+/* 4:3 image container — replace SVG with <img> if you have a real photo */
+.cal-guide-img {
+  position: relative;
+  width: 100%;
+  padding-top: 75%; /* 4:3 ratio */
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  overflow: hidden;
+}
+.cal-guide-img > * {
+  position: absolute;
+  inset: 0;
+}
+
+.cal-steps {
+  list-style: none; margin: 0; padding: 0;
+  display: flex; flex-direction: column; gap: 10px;
+}
+.cal-steps li {
+  display: flex; align-items: flex-start; gap: 12px;
+}
+.cal-step-num {
+  flex-shrink: 0;
+  width: 24px; height: 24px;
+  background: var(--accent); color: var(--bg);
+  border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  font: 700 12px var(--f-display);
+  margin-top: 1px;
+}
+.cal-steps li > div {
+  display: flex; flex-direction: column; gap: 2px;
+}
+.cal-steps li strong {
+  font-size: 13px; color: var(--fg);
+}
+.cal-steps li .dim {
+  font-size: 11px; color: var(--fg2); line-height: 1.4;
+}
+
+.cal-result-ok {
+  text-align: center;
+  font-size: 56px; line-height: 1;
+  color: var(--ok);
+  padding: 16px 0 8px;
+}
+
+/* ──────── CALIBRATION MODAL (Step 2 countdown) ──────── */
 .cal-stage { text-align: center; padding: 10px 0 4px; }
 .cal-instr {
   color: var(--paper-2); font-size: 12.5px;

@@ -101,11 +101,12 @@ export const state = {
 
   // calibration — dashboard-side per-slot offset
   calibration: {
-    active:     0,                 // slot being calibrated; 0 = none
-    startedAt:  0,
-    durationMs: 5000,
-    collected:  [],                // raw samples captured during calibration
-    offsets:    new Map(),         // slot -> { ax, ay, az, gx, gy, gz, samples, calibratedAt, mac }
+    activeSlots:     new Set(),    // slots currently being calibrated (supports calibrate-all)
+    collectedBySlot: new Map(),    // slot -> raw samples[] captured during calibration
+    active:          0,            // legacy single-slot indicator (kept in sync; 0 = none)
+    startedAt:       0,
+    durationMs:      5000,
+    offsets:         new Map(),    // slot -> { ax, ay, az, gx, gy, gz, samples, calibratedAt, mac, gravityAxis }
   },
 
   // per-node connection history (drops, reconnects, rx-rate sparkline)

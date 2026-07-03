@@ -296,7 +296,7 @@ namespace Session {
     void cleanStaleNodes() {
         const uint32_t now = millis();
         for (size_t i = 0; i < MAX_NODES; ++i) {
-            if (g_nodes[i].active && (now - g_nodes[i].lastSeenMs > 5000)) {
+            if (g_nodes[i].active && (now - g_nodes[i].lastSeenMs > 15000)) { // 15s timeout (node sends every 1s)
                 g_nodes[i].active = false;
                 g_nodes[i].slot = SLOT_UNASSIGNED;
             }
@@ -893,6 +893,7 @@ namespace WebServerApp {
         // ใช้ WIFI_AP_STA เพื่อแก้บั๊กรับ ESP-NOW Broadcast ไม่เข้าในบางบอร์ด (ESP32-S3/C3)
         WiFi.mode(WIFI_AP_STA);
         WiFi.softAP(AP_SSID, AP_PASSWORD, AP_CHANNEL);
+        WiFi.setSleep(false);   // ปิด power save → รับ ESP-NOW ได้ต่อเนื่อง ไม่หลุดเป็นช่วงๆ
         IPAddress ip = WiFi.softAPIP();
         Serial.printf("[WIFI] AP '%s' up at %s (channel %d)\n",
             AP_SSID, ip.toString().c_str(), AP_CHANNEL);
