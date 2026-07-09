@@ -52,6 +52,7 @@
       <!-- Athlete block -->
       <section class="block athlete">
         <div class="kicker">นักมวย · ATHLETE</div>
+        <label class="sr-only" for="athleteName">ชื่อนักมวย</label>
         <input id="athleteName" class="athlete-input" type="text" value="Fighter 1" maxlength="32" list="athleteHistory"
           autocomplete="off">
         <datalist id="athleteHistory"></datalist>
@@ -190,6 +191,29 @@
           <li class="dim">— no activity yet —</li>
         </ul>
       </section>
+
+      <div class="logger-panel">
+        <h3>🎯 โหมดเก็บข้อมูลฝึกสอน (AI Training Logger)</h3>
+
+        <label for="strikeLabel" class="logger-label">เลือกท่าทาง (Label):</label>
+        <select id="strikeLabel" class="logger-select">
+          <option value="0">0 - หมัดตรง (Jab/Cross)</option>
+          <option value="1">1 - หมัดฮุค (Hook)</option>
+          <option value="2">2 - ศอก (Elbow)</option>
+          <option value="3">3 - เตะ (Kick)</option>
+          <option value="4">4 - แทงเข่า (Knee)</option>
+        </select>
+
+        <div class="logger-actions">
+          <button id="btnRecordToggle" class="logger-btn logger-btn-record">
+            🔴 เริ่มบันทึก (Start)
+          </button>
+          <button id="btnExportCSV" class="logger-btn logger-btn-export">
+            💾 ดาวน์โหลด CSV
+          </button>
+        </div>
+        <p class="logger-meta">จำนวนข้อมูลที่บันทึก: <span id="recordCount">0</span> rows</p>
+      </div>
     </aside>
 
     <!-- ░░░░ CENTER STAGE ░░░░ -->
