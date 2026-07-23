@@ -17,6 +17,9 @@ import { isDemo, startDemo, demoApi } from './demo.js';
 import { persist, PERSIST_KEYS as K } from './persist.js';
 import { closeModal } from './modal.js';
 import { loadCalibration } from './calibrate.js';
+import { initLogger, renderLogger } from './logger.js';
+import { initScorecard, renderScorecard } from './score.js';
+import { maybeAutoStartTour, startTour } from './tour.js';
 
 const demo = isDemo();
 const api  = demo ? demoApi : realApi;
@@ -40,7 +43,30 @@ loadCalibration();
 
 // ───── bootstrap ─────
 initUi();
+initLogger();          // AI training data logger panel
+initScorecard();       // performance radar
 subscribe(renderAll);
+subscribe(renderScorecard);
+subscribe(renderLogger);
+
+// ───── developer mode (reveals AI Training Data Logger) ─────
+function applyDevMode(on) {
+  state.ui.devMode = !!on;
+  document.body.classList.toggle('is-dev', !!on);
+  const cb = document.getElementById('devModeToggle');
+  if (cb) cb.checked = !!on;
+  persist.set(K.devMode, !!on);
+}
+const urlDev = new URLSearchParams(location.search).has('dev');
+applyDevMode(urlDev || persist.get(K.devMode, false));
+document.getElementById('devModeToggle')?.addEventListener('change', e => {
+  applyDevMode(e.target.checked);
+  toast(e.target.checked ? '🛠 Developer mode ON · เปิดเครื่องมือเก็บข้อมูล' : 'Developer mode OFF', 'ok');
+});
+
+// ───── onboarding tour (first-run auto · re-openable) ─────
+document.getElementById('btnStartTour')?.addEventListener('click', startTour);
+maybeAutoStartTour();
 
 if (demo) {
   document.getElementById('modeTxt').textContent = 'DEMO';
@@ -220,6 +246,10 @@ window.addEventListener('keydown', (e) => {
     case 'f': toggleFullscreen(); break;
     case 'h': toggleHeatmap(); break;
     case 't': toggleTheme(); break;
+    case 'd':
+      applyDevMode(!state.ui.devMode);
+      toast(state.ui.devMode ? '🛠 Developer mode ON' : 'Developer mode OFF', 'ok');
+      break;
     case '?': case '/': openShortcutsModal(); break;
     case '0': case '1': case '2': case '3': case '4': {
       const filter = e.key === '0' ? 'all' : e.key;

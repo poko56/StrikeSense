@@ -389,13 +389,29 @@ function renderStrikeLog() {
 }
 
 // ───── NODES ─────
+let _lastNodesSig = '';
 function renderNodes() {
   const list = $('nodeList');
   if (!list) return;
   if (!state.nodes.length) {
-    list.innerHTML = `<div class="empty-card">— No nodes detected —<br><span class="dim">Power on a Strike Node within 2 m of the Main Node.</span></div>`;
+    if (_lastNodesSig !== 'empty') { _lastNodesSig = 'empty';
+      list.innerHTML = `<div class="empty-card">— ไม่พบโหนด · No nodes detected —<br><span class="dim">เปิดโหนดในระยะ 2 ม. จาก Main Node</span></div>`;
+    }
     return;
   }
+  // Never rebuild while the user is interacting with a node control (slot <select>
+  // etc.) — rebuilding wipes the open dropdown ("option" bug during streaming).
+  if (list.contains(document.activeElement) && document.activeElement !== document.body) return;
+  // Change-detection: only re-render when node data that affects the DOM changes,
+  // instead of ~60×/s. Big CPU win + keeps controls interactive.
+  const sig = state.nodes.map(n =>
+    [n.mac, n.slot, n.batteryPct, Math.round((n.rssi || 0) / 3), n.packetsRx, n.seqGaps,
+     (n.ageMs || 0) > 3000 ? 1 : 0,
+     state.calibration.offsets.has(n.slot) ? 1 : 0,
+     state.calibration.activeSlots.has(n.slot) ? 1 : 0].join(',')).join('|');
+  if (sig === _lastNodesSig) return;
+  _lastNodesSig = sig;
+
   list.innerHTML = state.nodes.map(n => {
     const isStale = (n.ageMs || 0) > 3000;
     const cls    = `node-card ${isStale ? 'stale' : 'live'}`;

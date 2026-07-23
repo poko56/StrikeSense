@@ -120,6 +120,7 @@ export const state = {
     bodyHeatmap:  false,
     fullscreen:   false,
     theme:        'dark',
+    devMode:      false,         // reveals AI Training Data Logger (?dev=1 / 'd' key)
     compareSet:   new Set(),     // session ids selected for compare
     activity:     [],            // last N events
   },

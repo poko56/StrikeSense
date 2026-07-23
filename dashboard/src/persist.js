@@ -25,4 +25,6 @@ export const PERSIST_KEYS = {
   theme:          'theme',           // 'dark' | 'light'
   modes:          'modes',           // { bodyHeatmap, stopwatch }
   compare:        'compare',         // string[] session ids
+  devMode:        'devMode',         // bool — reveal AI Training Data Logger
+  tourSeen:       'tourSeen',        // bool — onboarding tour completed/skipped
 };

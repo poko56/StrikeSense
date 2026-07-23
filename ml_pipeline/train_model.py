@@ -1,61 +1,255 @@
-import pandas as pd
+# =============================================================================
+# StrikeSense — 1D-CNN training pipeline (hierarchical labels)
+# -----------------------------------------------------------------------------
+# Flow:
+#   dashboard Data Logger  ->  strike_*.csv (raw 400 Hz IMU + fine label + slot)
+#      -> this script: clean -> sliding-window -> normalise -> train 1D-CNN
+#      -> evaluate (accuracy + confusion matrix)
+#      -> int8-quantise -> emit strike_model.h  (TFLite Micro C-array + metadata)
+#
+# LABEL SCHEME  (tens-encoding, matches dashboard <optgroup>):
+#   10-13 หมัด PUNCH · 20-25 ศอก ELBOW · 30-33 เข่า KNEE
+#   40-44 เตะ KICK   · 50-52 ถีบ TEEP
+#   coarse weapon class = floor(fine/10) - 1   ->   0..4
+#
+# Why hierarchical? The ESP32 runs a light 5-class model (accurate, cheap), while
+# the CSV keeps the full ~20-technique detail for future finer models. To train a
+# finer model instead, just change LABEL_MODE = "fine".
+#
+# Usage:
+#   pip install -r requirements.txt
+#   python train_model.py --data "./data/*.csv"
+# =============================================================================
+
+import argparse
+import glob
+import binascii
+import os
+
 import numpy as np
+import pandas as pd
 import tensorflow as tf
 from tensorflow.keras import layers, models
-import binascii
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import classification_report, confusion_matrix
+import matplotlib
+matplotlib.use("Agg")  # headless — save plots to file, no GUI
+import matplotlib.pyplot as plt
 
-# 1. กำหนดค่าพารามิเตอร์
-TIME_STEPS = 50   # ขนาดของ Window ที่ตัดมาวิเคราะห์
-STEP_SIZE = 25    # ระยะการเลื่อน Window
-FEATURES = 6      # ax, ay, az, gx, gy, gz
-NUM_CLASSES = 5   # จำนวนท่าทาง
+# ─────────────────────────── hyper-parameters ───────────────────────────
+TIME_STEPS = 50     # window length  (50 samples @400 Hz = 125 ms)
+STEP_SIZE  = 10     # window hop (dense overlap → more training windows)
+FEATURES   = 6      # ax, ay, az, gx, gy, gz  (slot is NOT a CNN feature; see below)
+EPOCHS     = 40
+BATCH_SIZE = 32
 
-# 2. ฟังก์ชันจัดเตรียมข้อมูล
-def create_windows(data, labels):
+# "coarse"    → 5 weapons (หมัด/ศอก/เข่า/เตะ/ถีบ) — light, runs on ESP32
+# "coarse_lr" → 10 classes = 5 weapons × ซ้าย/ขวา (ใช้ slot กำหนดข้าง) — ให้ AI แยกซ้าย-ขวา
+# "fine"      → ~20 techniques (ต้องการ dataset ใหญ่)
+LABEL_MODE = "coarse"
+
+COARSE_NAMES = ["Punch", "Elbow", "Knee", "Kick", "Teep"]
+
+FEATURE_COLS = ["ax", "ay", "az", "gx", "gy", "gz"]
+
+
+def _coarse(fine: pd.Series) -> pd.Series:
+    return (fine // 10 - 1).astype(int)          # 0..4
+
+def _side(slot: pd.Series) -> pd.Series:
+    # firmware NodeSlot: 1=L-hand 2=R-hand 3=L-shin 4=R-shin → 0=left, 1=right
+    return (1 - (slot.astype(int) % 2)).astype(int)
+
+def semantic_class(df: pd.DataFrame):
+    """Return (raw class ids, id→name fn) for the chosen LABEL_MODE.
+    ids may be non-contiguous; callers densely remap."""
+    if LABEL_MODE == "coarse":
+        ids = _coarse(df["label"])
+        namer = lambda i: COARSE_NAMES[i] if 0 <= i < 5 else f"c{i}"
+    elif LABEL_MODE == "coarse_lr":
+        ids = _coarse(df["label"]) * 2 + _side(df["slot"])       # 0..9
+        namer = lambda i: (COARSE_NAMES[i // 2] if 0 <= i // 2 < 5 else f"c{i//2}") + ("-L" if i % 2 == 0 else "-R")
+    else:  # fine
+        ids = df["label"].astype(int)
+        namer = lambda i: f"lbl{i}"
+    return ids.astype(int), namer
+
+
+# ─────────────────────────── data loading ───────────────────────────
+def load_dataset(pattern: str) -> pd.DataFrame:
+    """Concatenate every CSV matching `pattern`. A monotonically increasing
+    `file_id` is attached so windows never span two separate recordings."""
+    paths = sorted(glob.glob(pattern))
+    if not paths:
+        raise SystemExit(f"ไม่พบไฟล์ CSV ที่ตรงกับ: {pattern}")
+    frames = []
+    for fid, p in enumerate(paths):
+        df = pd.read_csv(p)
+        # tolerate legacy files that lack the `slot` column
+        if "slot" not in df.columns:
+            df["slot"] = 0
+        df["file_id"] = fid
+        frames.append(df)
+        print(f"  · {os.path.basename(p):<32} {len(df):>7} rows")
+    data = pd.concat(frames, ignore_index=True)
+    print(f"รวม {len(paths)} ไฟล์ · {len(data):,} แถว")
+    return data
+
+
+# ─────────────────────────── windowing ───────────────────────────
+def make_windows(df: pd.DataFrame):
+    """Sliding windows that never cross a (file_id, slot, class) boundary — every
+    window is homogeneous, so its label is unambiguous. Densely remaps the present
+    classes to 0..K-1 so labels stay contiguous even if some classes are missing.
+    Returns X, y, names."""
+    df = df.copy()
+    raw, namer = semantic_class(df)
+    present = sorted(raw.unique())
+    remap = {v: i for i, v in enumerate(present)}
+    names = [namer(int(v)) for v in present]
+    df["cls"] = raw.map(remap).astype(int)
+
     Xs, ys = [], []
-    for i in range(0, len(data) - TIME_STEPS, STEP_SIZE):
-        Xs.append(data.iloc[i:(i + TIME_STEPS)].values)
-        ys.append(labels.iloc[i])
-    return np.array(Xs), np.array(ys)
+    # a new "segment" starts whenever file / limb / class changes
+    seg_key = (
+        df["file_id"].astype(str) + "|" +
+        df["slot"].astype(str)    + "|" +
+        df["cls"].astype(str)
+    )
+    for _, seg in df.groupby((seg_key != seg_key.shift()).cumsum()):
+        feats = seg[FEATURE_COLS].to_numpy(dtype=np.float32)
+        cls   = int(seg["cls"].iloc[0])
+        for start in range(0, len(feats) - TIME_STEPS + 1, STEP_SIZE):
+            Xs.append(feats[start:start + TIME_STEPS])
+            ys.append(cls)
+    if not Xs:
+        raise SystemExit("ข้อมูลน้อยเกินไป: ไม่มี segment ใดยาวพอสำหรับ 1 window "
+                         f"(ต้องการ ≥{TIME_STEPS} แถวต่อท่า)")
+    return np.asarray(Xs, dtype=np.float32), np.asarray(ys, dtype=np.int64), names
 
-print("กำลังโหลดข้อมูลจาก strike_dataset.csv...")
-df = pd.read_csv('strike_dataset.csv')
 
-X_raw = df[['ax', 'ay', 'az', 'gx', 'gy', 'gz']]
-y_raw = df['label']
-X, y = create_windows(X_raw, y_raw)
+# ─────────────────────────── model ───────────────────────────
+def build_model(n_classes: int) -> tf.keras.Model:
+    m = models.Sequential([
+        layers.Input(shape=(TIME_STEPS, FEATURES)),
+        layers.Conv1D(32, 3, activation="relu", padding="same"),
+        layers.BatchNormalization(),
+        layers.MaxPooling1D(2),
+        layers.Conv1D(64, 3, activation="relu", padding="same"),
+        layers.BatchNormalization(),
+        layers.MaxPooling1D(2),
+        layers.Conv1D(64, 3, activation="relu", padding="same"),
+        layers.GlobalAveragePooling1D(),
+        layers.Dense(64, activation="relu"),
+        layers.Dropout(0.5),
+        layers.Dense(n_classes, activation="softmax"),
+    ])
+    m.compile(optimizer="adam",
+              loss="sparse_categorical_crossentropy",
+              metrics=["accuracy"])
+    return m
 
-# 3. สร้างโมเดล 1D-CNN
-model = models.Sequential([
-    layers.Input(shape=(TIME_STEPS, FEATURES)),
-    layers.Conv1D(filters=32, kernel_size=3, activation='relu'),
-    layers.MaxPooling1D(pool_size=2),
-    layers.Conv1D(filters=64, kernel_size=3, activation='relu'),
-    layers.MaxPooling1D(pool_size=2),
-    layers.Flatten(),
-    layers.Dense(64, activation='relu'),
-    layers.Dropout(0.5),
-    layers.Dense(NUM_CLASSES, activation='softmax')
-])
 
-model.compile(optimizer='adam', loss='sparse_categorical_crossentropy', metrics=['accuracy'])
+# ─────────────────────────── evaluation ───────────────────────────
+def plot_confusion(y_true, y_pred, names, out="confusion_matrix.png"):
+    cm = confusion_matrix(y_true, y_pred)
+    fig, ax = plt.subplots(figsize=(6, 5))
+    im = ax.imshow(cm, cmap="Reds")
+    ax.set_xticks(range(len(names)), names, rotation=45, ha="right")
+    ax.set_yticks(range(len(names)), names)
+    ax.set_xlabel("Predicted"); ax.set_ylabel("True")
+    ax.set_title(f"StrikeSense — Confusion Matrix ({LABEL_MODE})")
+    thresh = cm.max() / 2 if cm.max() else 0
+    for i in range(cm.shape[0]):
+        for j in range(cm.shape[1]):
+            ax.text(j, i, cm[i, j], ha="center", va="center",
+                    color="white" if cm[i, j] > thresh else "black")
+    fig.colorbar(im); fig.tight_layout(); fig.savefig(out, dpi=130)
+    print(f"บันทึก confusion matrix → {out}")
 
-# 4. เริ่มเทรน
-print("เริ่มการฝึกสอน AI...")
-model.fit(X, y, epochs=30, batch_size=32, validation_split=0.2)
 
-# 5. แปลงโมเดลเป็น C Array สำหรับ ESP32
-print("กำลังบันทึกไฟล์ AI สำหรับบอร์ด ESP32...")
-converter = tf.lite.TFLiteConverter.from_keras_model(model)
-converter.optimizations = [tf.lite.Optimize.DEFAULT]
-tflite_model = converter.convert()
+# ─────────────────────────── TFLite export ───────────────────────────
+def export_header(model, X_repr, mean, std, names, out="strike_model.h"):
+    """int8 full-integer quantisation (ideal for TFLite Micro on ESP32-S3),
+    then emit a C header with the model + all metadata the firmware needs."""
+    def representative_dataset():
+        for i in range(min(300, len(X_repr))):
+            yield [((X_repr[i] - mean) / std)[None].astype(np.float32)]
 
-hex_str = binascii.hexlify(tflite_model).decode('utf-8')
-c_array = ', '.join(['0x' + hex_str[i:i+2] for i in range(0, len(hex_str), 2)])
+    conv = tf.lite.TFLiteConverter.from_keras_model(model)
+    conv.optimizations = [tf.lite.Optimize.DEFAULT]
+    conv.representative_dataset = representative_dataset
+    conv.target_spec.supported_ops = [tf.lite.OpsSet.TFLITE_BUILTINS_INT8]
+    conv.inference_input_type = tf.int8
+    conv.inference_output_type = tf.int8
+    tflite = conv.convert()
 
-with open('strike_model.h', 'w') as f:
-    f.write("#ifndef STRIKE_MODEL_H\n#define STRIKE_MODEL_H\n\n")
-    f.write(f"const unsigned char model_tflite[] = {{\n    {c_array}\n}};\n")
-    f.write(f"const unsigned int model_tflite_len = {len(tflite_model)};\n\n#endif\n")
+    hexstr = binascii.hexlify(tflite).decode()
+    c_array = ", ".join("0x" + hexstr[i:i+2] for i in range(0, len(hexstr), 2))
+    names_c = ", ".join(f'"{n}"' for n in names)
+    mean_c  = ", ".join(f"{v:.6f}f" for v in mean)
+    std_c   = ", ".join(f"{v:.6f}f" for v in std)
 
-print("สำเร็จ! ได้ไฟล์ strike_model.h แล้ว")
+    with open(out, "w") as f:
+        f.write("// Auto-generated by ml_pipeline/train_model.py — do not edit by hand.\n")
+        f.write("#ifndef STRIKE_MODEL_H\n#define STRIKE_MODEL_H\n\n")
+        f.write(f"#define STRIKE_TIME_STEPS {TIME_STEPS}\n")
+        f.write(f"#define STRIKE_FEATURES   {FEATURES}\n")
+        f.write(f"#define STRIKE_NUM_CLASSES {len(names)}\n\n")
+        f.write(f"static const char* STRIKE_CLASS_NAMES[{len(names)}] = {{ {names_c} }};\n\n")
+        f.write("// per-axis standardisation — apply (x-mean)/std BEFORE quantising input\n")
+        f.write(f"static const float STRIKE_FEAT_MEAN[{FEATURES}] = {{ {mean_c} }};\n")
+        f.write(f"static const float STRIKE_FEAT_STD[{FEATURES}]  = {{ {std_c} }};\n\n")
+        f.write(f"const unsigned int strike_model_tflite_len = {len(tflite)};\n")
+        f.write("const unsigned char strike_model_tflite[] = {\n    "
+                + c_array + "\n};\n\n#endif // STRIKE_MODEL_H\n")
+    print(f"บันทึกโมเดล → {out}  ({len(tflite):,} bytes, int8)")
+
+
+# ─────────────────────────── main ───────────────────────────
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--data", default="./data/*.csv",
+                    help="glob ของไฟล์ CSV จาก Data Logger (เช่น './data/*.csv')")
+    ap.add_argument("--out", default="strike_model.h")
+    args = ap.parse_args()
+
+    print("โหลดข้อมูล…")
+    df = load_dataset(args.data)
+
+    print("สร้าง sliding windows…")
+    X, y, names = make_windows(df)
+    n_classes = len(names)
+    print(f"โหมด={LABEL_MODE}  windows={len(X):,}  shape={X.shape[1:]}  classes={n_classes} {names}")
+    for c in range(n_classes):
+        print(f"    {names[c]:<10} : {(y == c).sum():>6} windows")
+
+    # split BEFORE normalisation so stats come from train only (no leakage)
+    X_tr, X_te, y_tr, y_te = train_test_split(
+        X, y, test_size=0.2, random_state=42, stratify=y)
+
+    # per-axis standardisation
+    mean = X_tr.reshape(-1, FEATURES).mean(0)
+    std  = X_tr.reshape(-1, FEATURES).std(0) + 1e-6
+    Xn_tr = (X_tr - mean) / std
+    Xn_te = (X_te - mean) / std
+
+    print("เทรนโมเดล…")
+    model = build_model(n_classes)
+    model.fit(Xn_tr, y_tr, epochs=EPOCHS, batch_size=BATCH_SIZE,
+              validation_split=0.2, verbose=2)
+
+    print("\nประเมินผลบนชุดทดสอบ…")
+    loss, acc = model.evaluate(Xn_te, y_te, verbose=0)
+    print(f"Test accuracy = {acc:.3f}")
+    y_pred = model.predict(Xn_te, verbose=0).argmax(1)
+    print(classification_report(y_te, y_pred, target_names=names, digits=3))
+    plot_confusion(y_te, y_pred, names)
+
+    print("\nแปลงเป็น TFLite Micro (int8) …")
+    export_header(model, X_tr, mean, std, names, out=args.out)
+    print("สำเร็จ! นำ strike_model.h ไปวางใน firmware/main-node/ แล้ว flash ได้เลย")
+
+
+if __name__ == "__main__":
+    main()

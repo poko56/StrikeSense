@@ -1,6 +1,7 @@
 // WebSocket binary frame decoder + reconnect logic.
 import { state, scheduleRender } from './state.js';
 import { ingestBatch } from './analyzer.js';
+import { logSensorData } from './logger.js';
 
 const ACCEL_LSB_PER_G  = 2048;
 const GYRO_LSB_PER_DPS = 16.4;
@@ -72,6 +73,9 @@ function decodeFrame(buf) {
       gy: dv.getInt16(off + 8, true) / GYRO_LSB_PER_DPS,
       gz: dv.getInt16(off + 10, true) / GYRO_LSB_PER_DPS,
     };
+    // AI training logger — no-op unless recording is armed.
+    // `slot` (frame-level) tags which limb produced the sample.
+    logSensorData(samples[i], slot);
   }
 
   pktCounter++;

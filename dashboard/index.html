@@ -58,24 +58,24 @@
         <datalist id="athleteHistory"></datalist>
         <div class="athlete-meta">
           <label class="select-wrap">
-            <span class="kicker tiny">DRILL</span>
+            <span class="kicker tiny">ประเภทซ้อม</span>
             <select id="drillType">
-              <option value="shadow">Shadow</option>
-              <option value="pad" selected>Pad Work</option>
-              <option value="bag">Heavy Bag</option>
-              <option value="spar">Sparring</option>
-              <option value="free">Freestyle</option>
+              <option value="shadow">ชกลม</option>
+              <option value="pad" selected>เตะแพ็ด</option>
+              <option value="bag">กระสอบ</option>
+              <option value="spar">คู่ซ้อม</option>
+              <option value="free">อิสระ</option>
             </select>
           </label>
           <label class="select-wrap">
-            <span class="kicker tiny">MODE</span>
+            <span class="kicker tiny">โหมดเวลา</span>
             <select id="roundPreset">
-              <option value="3x3">3 × 3:00 / 1:00</option>
-              <option value="5x3" selected>5 × 3:00 / 1:00</option>
-              <option value="3x2">3 × 2:00 / 0:30</option>
-              <option value="12x3">12 × 3:00 / 1:00</option>
-              <option value="stopwatch">Stopwatch (free)</option>
-              <option value="custom">Custom…</option>
+              <option value="3x3">3 ยก × 3:00 / 1:00</option>
+              <option value="5x3" selected>5 ยก × 3:00 / 1:00</option>
+              <option value="3x2">3 ยก × 2:00 / 0:30</option>
+              <option value="12x3">12 ยก × 3:00 / 1:00</option>
+              <option value="stopwatch">จับเวลาอิสระ</option>
+              <option value="custom">กำหนดเอง…</option>
             </select>
           </label>
         </div>
@@ -192,28 +192,81 @@
         </ul>
       </section>
 
-      <div class="logger-panel">
-        <h3>🎯 โหมดเก็บข้อมูลฝึกสอน (AI Training Logger)</h3>
+      <!-- AI Training · Data Logger (developer mode) -->
+      <section class="block logger-block">
+        <div class="kicker">AI TRAINING · DATA LOGGER</div>
+        <p class="logger-hint">
+          เก็บ raw IMU (400Hz) ติดป้ายท่า → export CSV → เทรน 1D-CNN บนคอมพิวเตอร์ → อัปโหลดโมเดลกลับเข้า ESP32
+        </p>
 
-        <label for="strikeLabel" class="logger-label">เลือกท่าทาง (Label):</label>
-        <select id="strikeLabel" class="logger-select">
-          <option value="0">0 - หมัดตรง (Jab/Cross)</option>
-          <option value="1">1 - หมัดฮุค (Hook)</option>
-          <option value="2">2 - ศอก (Elbow)</option>
-          <option value="3">3 - เตะ (Kick)</option>
-          <option value="4">4 - แทงเข่า (Knee)</option>
-        </select>
+        <label class="select-wrap logger-select-wrap">
+          <span class="kicker tiny">ท่าที่บันทึก · STRIKE LABEL</span>
+          <label class="sr-only" for="strikeLabel">เลือกท่ามวยที่จะบันทึก</label>
+          <select id="strikeLabel">
+            <optgroup label="หมัด · PUNCH">
+              <option value="10">หมัดตรงชกนำ · Jab</option>
+              <option value="11">หมัดตรงหลัง · Cross</option>
+              <option value="12">หมัดฮุก/เหวี่ยง · Hook</option>
+              <option value="13">หมัดอัพเปอร์คัท/สอยดาว · Uppercut</option>
+            </optgroup>
+            <optgroup label="ศอก · ELBOW">
+              <option value="20">ศอกตี (บนลงล่าง) · Chopping</option>
+              <option value="21">ศอกตัด (ขนานพื้น) · Slashing</option>
+              <option value="22">ศอกงัด (ล่างขึ้นบน) · Uppercut</option>
+              <option value="23">ศอกพุ่ง · Thrusting</option>
+              <option value="24">ศอกกระทุ้ง · Spearing</option>
+              <option value="25">ศอกกลับ · Spinning</option>
+            </optgroup>
+            <optgroup label="เข่า · KNEE">
+              <option value="30">เข่าตรง/เข่าโหน · Straight</option>
+              <option value="31">เข่าเฉียง/เข่าตี · Diagonal</option>
+              <option value="32">เข่าตัด · Curving</option>
+              <option value="33">เข่าลอย · Flying</option>
+            </optgroup>
+            <optgroup label="เตะ · KICK">
+              <option value="40">เตะตรง · Straight/Up</option>
+              <option value="41" selected>เตะเฉียง · Roundhouse</option>
+              <option value="42">เตะตัด (ล่าง) · Low</option>
+              <option value="43">เตะกลับ · Spinning-back</option>
+              <option value="44">เตะเหวี่ยงกลับ · Spinning-heel</option>
+            </optgroup>
+            <optgroup label="ถีบ · TEEP">
+              <option value="50">ถีบตรง (สกัด) · Straight</option>
+              <option value="51">ถีบข้าง · Side</option>
+              <option value="52">ถีบกลับหลัง · Back</option>
+            </optgroup>
+          </select>
+        </label>
+
+        <!-- node readiness (ต้องมีโหนดของอวัยวะที่จะเก็บ · แยกซ้าย-ขวา) -->
+        <div class="logger-nodes">
+          <span class="kicker tiny">โหนดที่พร้อม · REQUIRED NODES</span>
+          <div class="node-chips">
+            <span class="node-chip" id="nodeChip-1" data-slot="1">🥊 มือซ้าย</span>
+            <span class="node-chip" id="nodeChip-2" data-slot="2">🥊 มือขวา</span>
+            <span class="node-chip" id="nodeChip-3" data-slot="3">🦵 แข้งซ้าย</span>
+            <span class="node-chip" id="nodeChip-4" data-slot="4">🦵 แข้งขวา</span>
+          </div>
+          <label class="logger-check">
+            <input type="checkbox" id="loggerRequireBoth" checked>
+            <span>ต้องครบซ้าย-ขวา ก่อนบันทึก (ให้ AI แยกข้างได้)</span>
+          </label>
+        </div>
+        <p class="logger-guard-hint" id="loggerGuardHint"></p>
 
         <div class="logger-actions">
-          <button id="btnRecordToggle" class="logger-btn logger-btn-record">
-            🔴 เริ่มบันทึก (Start)
+          <button id="btnRecordToggle" class="logger-btn logger-btn-record" type="button">
+            <span class="rec-dot"></span><span id="btnRecordLabel">เริ่มบันทึก</span>
           </button>
-          <button id="btnExportCSV" class="logger-btn logger-btn-export">
-            💾 ดาวน์โหลด CSV
-          </button>
+          <button id="btnExportCSV" class="logger-btn logger-btn-export" type="button" title="ดาวน์โหลดข้อมูลเป็น CSV">↓ CSV</button>
         </div>
-        <p class="logger-meta">จำนวนข้อมูลที่บันทึก: <span id="recordCount">0</span> rows</p>
-      </div>
+
+        <div class="logger-readout">
+          <div class="lr-cell"><span class="lr-k">ROWS</span><span class="lr-v mono" id="recordCount">0</span></div>
+          <div class="lr-cell"><span class="lr-k">TIME</span><span class="lr-v mono" id="recordTime">0.0s</span></div>
+          <div class="lr-cell"><span class="lr-k">LIMB</span><span class="lr-v mono" id="recordLimb">—</span></div>
+        </div>
+      </section>
     </aside>
 
     <!-- ░░░░ CENTER STAGE ░░░░ -->
@@ -294,6 +347,39 @@
         </div>
       </div>
 
+      <!-- Performance scorecard (radar) -->
+      <div class="block scorecard-block">
+        <div class="block-head">
+          <div class="kicker">SCORECARD · ประเมินผล</div>
+          <span class="dim small">จุดเด่น/จุดพลาดจากเซนเซอร์ · อัปเดตสด</span>
+        </div>
+        <div class="scorecard-wrap">
+          <div class="radar-col">
+            <svg viewBox="0 0 280 250" class="radar" id="radarSvg" aria-label="แผนภูมิเรดาร์คะแนน"></svg>
+          </div>
+          <div class="score-col">
+            <div class="score-hero">
+              <div class="score-grade g-wait" id="scoreGrade">–</div>
+              <div class="score-hero-meta">
+                <div class="score-overall"><span class="mono" id="scoreOverall">—</span><span class="score-of">/100</span></div>
+                <div class="score-grade-sub" id="scoreGradeSub">รอข้อมูล</div>
+              </div>
+            </div>
+            <div class="score-bars" id="scoreBars"></div>
+            <div class="score-callouts">
+              <div class="sc-callout">
+                <span class="kicker tiny">จุดเด่น · STRENGTHS</span>
+                <div class="sc-tags" id="scoreStrengths"><span class="sc-tag dim">—</span></div>
+              </div>
+              <div class="sc-callout">
+                <span class="kicker tiny">ควรพัฒนา · FOCUS</span>
+                <div class="sc-tags" id="scoreWeak"><span class="sc-tag dim">—</span></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
       <!-- Session timeline + strike log -->
       <div class="block strike-log">
         <div class="block-head">
@@ -345,9 +431,9 @@
     <aside class="rail rail-right">
 
       <nav class="tabs">
-        <button class="tab tab-on" data-tab="sensors">SENSORS</button>
-        <button class="tab" data-tab="library">LIBRARY</button>
-        <button class="tab" data-tab="system">SYSTEM</button>
+        <button class="tab tab-on" data-tab="sensors">เซนเซอร์</button>
+        <button class="tab" data-tab="library">คลังข้อมูล</button>
+        <button class="tab" data-tab="system">ระบบ</button>
       </nav>
 
       <!-- SENSORS -->
@@ -392,7 +478,19 @@
 
       <!-- SYSTEM -->
       <section class="block tabpane" data-pane="system">
-        <div class="kicker">MAIN NODE</div>
+        <div class="dev-toggle-row">
+          <div>
+            <div class="kicker">DEVELOPER MODE</div>
+            <div class="dim small">แสดงเครื่องมือเก็บข้อมูลเทรน AI (หรือกด <b>D</b> / เปิดด้วย <span class="mono">?dev=1</span>)</div>
+          </div>
+          <label class="switch">
+            <input type="checkbox" id="devModeToggle">
+            <span class="switch-track"><span class="switch-thumb"></span></span>
+          </label>
+        </div>
+        <button class="tour-launch" id="btnStartTour" type="button">🎓 เริ่มทัวร์แนะนำการใช้งาน</button>
+
+        <div class="kicker mt-4">MAIN NODE</div>
         <table class="kv-table mono">
           <tr>
             <td>IP</td>
