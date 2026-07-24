@@ -675,6 +675,7 @@ namespace StatusLed {
 namespace WebServerApp {
     static AsyncWebServer    g_http(HTTP_PORT);
     static AsyncWebSocket    g_ws(WS_PATH);
+    static uint32_t          g_wsDropped = 0;   // frames dropped by backpressure (see broadcastImuFrame)
 
     static void macToStr(const uint8_t* m, char* buf, size_t n) {
         snprintf(buf, n, "%02X:%02X:%02X:%02X:%02X:%02X", m[0],m[1],m[2],m[3],m[4],m[5]);
@@ -714,6 +715,7 @@ namespace WebServerApp {
             doc["rx"]        = EspNowRx::packetsReceived();
             doc["dropped"]   = EspNowRx::packetsDropped();
             doc["wsClients"] = g_ws.count();
+            doc["wsDropped"] = g_wsDropped;
 
             JsonObject sess = doc["session"].to<JsonObject>();
             const auto& s = Session::stats();
@@ -908,6 +910,15 @@ namespace WebServerApp {
 
     void broadcastImuFrame(const ImuFrame& f) {
         if (g_ws.count() == 0) return;
+        // Backpressure: 4 nodes stream ~200 msg/s (400Hz / 8 samples x4). When
+        // the single dashboard client can't drain that fast over WiFi, blindly
+        // calling binaryAll() keeps allocating send buffers and piling onto the
+        // TCP send path — heap churn + AsyncTCP overload that resets the socket,
+        // making the dashboard flap OFFLINE<->LIVE. availableForWriteAll() is
+        // the library-recommended guard: skip this frame while the client's
+        // queue is full and let it drain. IMU frames are real-time, so a dropped
+        // frame here is cheaper than losing the whole connection.
+        if (!g_ws.availableForWriteAll()) { g_wsDropped++; return; }
         uint8_t buf[16 + IMU_SAMPLES_PER_PACKET * 12];
         buf[0] = 0x01;
         buf[1] = (uint8_t)f.slot;
@@ -922,6 +933,7 @@ namespace WebServerApp {
 
     void loop()                  { g_ws.cleanupClients(); }
     size_t connectedClients()    { return g_ws.count(); }
+    uint32_t wsDropped()         { return g_wsDropped; }
 } // namespace WebServerApp
 
 // ============================================================
