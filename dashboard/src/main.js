@@ -18,6 +18,7 @@ import { persist, PERSIST_KEYS as K } from './persist.js';
 import { closeModal } from './modal.js';
 import { loadCalibration } from './calibrate.js';
 import { initLogger, renderLogger } from './logger.js';
+import { initAiModel, renderAiModel } from './aimodel.js';
 import { initScorecard, renderScorecard } from './score.js';
 import { maybeAutoStartTour, startTour } from './tour.js';
 
@@ -44,10 +45,12 @@ loadCalibration();
 // ───── bootstrap ─────
 initUi();
 initLogger();          // AI training data logger panel
+initAiModel();         // AI gesture model — upload + live inference
 initScorecard();       // performance radar
 subscribe(renderAll);
 subscribe(renderScorecard);
 subscribe(renderLogger);
+subscribe(renderAiModel);
 
 // ───── developer mode (reveals AI Training Data Logger) ─────
 function applyDevMode(on) {

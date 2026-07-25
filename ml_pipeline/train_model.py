@@ -24,6 +24,8 @@
 import argparse
 import glob
 import binascii
+import datetime
+import json
 import os
 
 import numpy as np
@@ -206,13 +208,99 @@ def export_header(model, X_repr, mean, std, names, out="strike_model.h"):
     print(f"บันทึกโมเดล → {out}  ({len(tflite):,} bytes, int8)")
 
 
+# ─────────────────────── web model export (browser) ───────────────────────
+def export_web_model(model, mean, std, names, out="strike_web_model.json"):
+    """Emit a self-contained JSON the dashboard loads and runs in-browser
+    (dashboard/src/aimodel.js). Full-precision float32 weights — no quantisation,
+    so browser inference matches Keras closely. The user uploads this file in the
+    UI; it is NOT baked into firmware, so its size never bloats the ESP32 image."""
+
+    def r6(a):
+        # round to 6 dp to shrink JSON without hurting accuracy
+        return np.asarray(a, dtype=np.float64).round(6).ravel().tolist()
+
+    layers_json = []
+    for lyr in model.layers:
+        cls = lyr.__class__.__name__
+        cfg = lyr.get_config()
+        if cls == "InputLayer":
+            continue
+        elif cls == "Conv1D":
+            W, b = lyr.get_weights()                 # W: (kernel, C_in, filters)
+            layers_json.append({
+                "type": "conv1d",
+                "filters": int(lyr.filters),
+                "kernel_size": int(lyr.kernel_size[0]),
+                "strides": int(lyr.strides[0]),
+                "padding": lyr.padding,              # 'same' | 'valid'
+                "activation": cfg.get("activation", "linear"),
+                "kernel_shape": list(W.shape),
+                "kernel": r6(W), "bias": r6(b),
+            })
+        elif cls == "BatchNormalization":
+            gamma, beta, mmean, mvar = lyr.get_weights()
+            layers_json.append({
+                "type": "batch_normalization",
+                "epsilon": float(cfg.get("epsilon", 1e-3)),
+                "gamma": r6(gamma), "beta": r6(beta),
+                "moving_mean": r6(mmean), "moving_variance": r6(mvar),
+            })
+        elif cls == "MaxPooling1D":
+            layers_json.append({
+                "type": "max_pooling1d",
+                "pool_size": int(lyr.pool_size[0]),
+                "strides": int(lyr.strides[0]),
+            })
+        elif cls == "GlobalAveragePooling1D":
+            layers_json.append({"type": "global_average_pooling1d"})
+        elif cls == "Flatten":
+            layers_json.append({"type": "flatten"})
+        elif cls == "Dropout":
+            continue                                  # inference no-op
+        elif cls == "Dense":
+            W, b = lyr.get_weights()                  # W: (in, out)
+            layers_json.append({
+                "type": "dense",
+                "units": int(lyr.units),
+                "activation": cfg.get("activation", "linear"),
+                "kernel_shape": list(W.shape),
+                "kernel": r6(W), "bias": r6(b),
+            })
+        elif cls == "Activation":
+            layers_json.append({"type": "activation", "activation": cfg.get("activation", "linear")})
+        else:
+            raise SystemExit(f"web export: เลเยอร์ที่ยังไม่รองรับ — {cls}")
+
+    doc = {
+        "format": "strikesense-web/1",
+        "created": datetime.datetime.now().isoformat(timespec="seconds"),
+        "label_mode": LABEL_MODE,
+        "time_steps": TIME_STEPS,
+        "features": FEATURES,
+        "labels": list(names),
+        "norm": {"mean": [float(x) for x in mean], "std": [float(x) for x in std]},
+        "layers": layers_json,
+    }
+    with open(out, "w", encoding="utf-8") as f:
+        json.dump(doc, f, ensure_ascii=False, separators=(",", ":"))
+    kb = os.path.getsize(out) / 1024
+    print(f"บันทึกโมเดลเว็บ → {out}  ({kb:,.0f} KB, {len(layers_json)} layers) — อัปโหลดไฟล์นี้ในแดชบอร์ด")
+
+
 # ─────────────────────────── main ───────────────────────────
 def main():
+    global LABEL_MODE
     ap = argparse.ArgumentParser()
     ap.add_argument("--data", default="./data/*.csv",
                     help="glob ของไฟล์ CSV จาก Data Logger (เช่น './data/*.csv')")
-    ap.add_argument("--out", default="strike_model.h")
+    ap.add_argument("--mode", default=LABEL_MODE, choices=["coarse", "coarse_lr", "fine"],
+                    help="ความละเอียดของคลาส: coarse=5 อาวุธ · coarse_lr=แยกซ้ายขวา · fine=ทุกท่า (ต้องมี dataset ใหญ่)")
+    ap.add_argument("--out", default="strike_model.h",
+                    help="ไฟล์ TFLite Micro (ฝังใน firmware แล้ว flash — เส้นทางรันบน ESP32)")
+    ap.add_argument("--web-out", default="strike_web_model.json",
+                    help="ไฟล์โมเดลสำหรับอัปโหลดในแดชบอร์ด (รัน inference ในเบราว์เซอร์)")
     args = ap.parse_args()
+    LABEL_MODE = args.mode
 
     print("โหลดข้อมูล…")
     df = load_dataset(args.data)
@@ -248,7 +336,13 @@ def main():
 
     print("\nแปลงเป็น TFLite Micro (int8) …")
     export_header(model, X_tr, mean, std, names, out=args.out)
-    print("สำเร็จ! นำ strike_model.h ไปวางใน firmware/main-node/ แล้ว flash ได้เลย")
+
+    print("\nส่งออกโมเดลสำหรับแดชบอร์ด (browser inference) …")
+    export_web_model(model, mean, std, names, out=args.web_out)
+
+    print("\nสำเร็จ!")
+    print(f"  • ESP32 (ฝังใน firmware): นำ {args.out} ไปวางใน firmware/main-node/ แล้ว flash")
+    print(f"  • เบราว์เซอร์ (แนะนำ): อัปโหลด {args.web_out} ในแดชบอร์ด → เปิด 'ตรวจจับท่าด้วย AI'")
 
 
 if __name__ == "__main__":

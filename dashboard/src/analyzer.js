@@ -1,6 +1,7 @@
 // Strike detection, waveform buffer, per-round + time-on-target tracking.
 import { state, scheduleRender, pushActivity, WAVEFORM_SAMPLES } from './state.js';
 import { applyOffset, isCalibrating, collectSample } from './calibrate.js';
+import { aiOnStrike, aiPushSample } from './aimodel.js';
 
 export function magA(s) { return Math.sqrt(s.ax*s.ax + s.ay*s.ay + s.az*s.az); }
 export function magG(s) { return Math.sqrt(s.gx*s.gx + s.gy*s.gy + s.gz*s.gz); }
@@ -51,6 +52,10 @@ export function ingestBatch({ slot, rssi, mac, samples, seq, recvMs }) {
     scheduleRender();
     return;
   }
+
+  // Feed RAW samples (pre-calibration) to the AI inference ring — matches the
+  // training CSV distribution, and works for both the WS and demo data paths.
+  for (const s of samples) aiPushSample(slot, s);
 
   // Apply per-slot calibration offsets (no-op if not calibrated)
   for (const s of samples) applyOffset(slot, s);
@@ -106,9 +111,15 @@ function recordStrike({ slot, peakG, peakDps, recvMs, seq }) {
   const lastT    = state.strikes.length ? state.strikes[state.strikes.length - 1].sessionMs : 0;
   const recoverMs= sessionT - lastT;
 
+  // AI technique classification (in-browser 1D-CNN) — no-op unless a model is
+  // loaded and enabled. Runs on the raw window ending at this strike.
+  const ai = aiOnStrike(slot);
+
   const ev = {
     id:        ++state.strikeSeq,
     slot, type, peakG, peakDps,
+    aiLabel:   ai ? ai.label : null,
+    aiConf:    ai ? ai.conf  : 0,
     durationMs: 0,
     recoverMs,
     sessionMs:  sessionT,

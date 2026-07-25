@@ -112,6 +112,18 @@ export const state = {
   // per-node connection history (drops, reconnects, rx-rate sparkline)
   nodeHistory: new Map(),          // mac -> { firstSeen, state:'live'|'stale', drops:[{at,age}], reconnects:[{at,gap}], rxSamples:[{t,rx}], lastRxCount, lastBattery }
 
+  // AI gesture model — user uploads a trained model (strike_web_model.json) and
+  // the dashboard runs 1D-CNN inference in-browser on the live IMU stream.
+  ai: {
+    enabled:   false,            // run inference on strikes
+    ready:     false,            // a valid model is loaded
+    meta:      null,             // { labels[], time_steps, features, label_mode, created }
+    error:     '',               // last load error (shown in panel)
+    rawBySlot: new Map(),        // slot -> { buf:Float32Array(CAP*FEATURES), idx, count }  raw IMU ring
+    last:      null,             // { slot, label, conf, at, probs:number[] }  most recent detection
+    history:   [],               // recent detections [{ slot, label, conf, at }]
+  },
+
   // UI / modes
   ui: {
     activeTab:    'sensors',

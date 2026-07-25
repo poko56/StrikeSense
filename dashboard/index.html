@@ -196,7 +196,7 @@
       <section class="block logger-block">
         <div class="kicker">AI TRAINING · DATA LOGGER</div>
         <p class="logger-hint">
-          เก็บ raw IMU (400Hz) ติดป้ายท่า → export CSV → เทรน 1D-CNN บนคอมพิวเตอร์ → อัปโหลดโมเดลกลับเข้า ESP32
+          เก็บ raw IMU (400Hz) ติดป้ายท่า → export CSV → เทรน 1D-CNN บนคอมพิวเตอร์ → อัปโหลดโมเดล (.json) ในช่อง "AI MODEL" ด้านล่าง
         </p>
 
         <label class="select-wrap logger-select-wrap">
@@ -266,6 +266,37 @@
           <div class="lr-cell"><span class="lr-k">TIME</span><span class="lr-v mono" id="recordTime">0.0s</span></div>
           <div class="lr-cell"><span class="lr-k">LIMB</span><span class="lr-v mono" id="recordLimb">—</span></div>
         </div>
+      </section>
+
+      <!-- AI Model · live gesture detection (in-browser 1D-CNN) -->
+      <section class="block ai-block">
+        <div class="kicker">AI MODEL · ตรวจจับท่า</div>
+        <p class="ai-hint">
+          อัปโหลดไฟล์ <b>strike_web_model.json</b> ที่ได้จากการเทรน → เปิดใช้งาน แล้วระบบจะทายท่าจากการออกอาวุธแบบเรียลไทม์ (ประมวลผลในเบราว์เซอร์ ไม่ต้องต่อเน็ต)
+        </p>
+
+        <div class="ai-file-row">
+          <label class="ai-upload-btn">
+            <input type="file" id="aiModelFile" accept=".json,application/json" hidden>
+            <span>⬆ เลือกไฟล์โมเดล</span>
+          </label>
+          <button id="aiModelClear" class="ai-clear-btn" type="button" title="ลบโมเดลออก">✕ ล้าง</button>
+        </div>
+
+        <div class="ai-status" id="aiModelStatus">ยังไม่ได้โหลดโมเดล</div>
+
+        <label class="ai-enable">
+          <input type="checkbox" id="aiEnableToggle">
+          <span>เปิดตรวจจับท่าด้วย AI</span>
+        </label>
+
+        <div class="ai-readout">
+          <div class="ai-big" id="aiLastLabel">—</div>
+          <div class="ai-conf mono" id="aiLastConf"></div>
+        </div>
+
+        <div class="ai-probs" id="aiProbs"></div>
+        <div class="ai-recent" id="aiRecent"></div>
       </section>
     </aside>
 
