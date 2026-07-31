@@ -133,21 +133,21 @@ async function startSession() {
     state.session.startedAtMs = Date.now();
     state.session.athlete     = athlete;
     resetSessionState();
-    pushActivity('rec', `▶ Recording started · ${res.sessionId}`);
-    toast(`Recording started · ${res.sessionId}`, 'ok');
-    if (!res.sdLogging) toast('Warning: SD logging unavailable', 'warn');
+    pushActivity('rec', `▶ เริ่มบันทึก · ${res.sessionId}`);
+    toast(`เริ่มบันทึกแล้ว · ${res.sessionId}`, 'ok');
+    if (!res.sdLogging) toast('เตือน: บันทึกลง SD card ไม่ได้', 'warn');
     scheduleRender();
-  } catch (e) { toast(`Start failed: ${e.message}`, 'warn'); }
+  } catch (e) { toast(`เริ่มไม่สำเร็จ: ${e.message}`, 'warn'); }
 }
 async function stopSession() {
   try {
     await api.sessionStop();
     state.session.active = false;
-    pushActivity('rec', `■ Recording stopped`);
-    toast('Recording stopped', 'ok');
+    pushActivity('rec', `■ หยุดบันทึก`);
+    toast('หยุดบันทึกแล้ว', 'ok');
     refreshLibrary();
     scheduleRender();
-  } catch (e) { toast(`Stop failed: ${e.message}`, 'warn'); }
+  } catch (e) { toast(`หยุดไม่สำเร็จ: ${e.message}`, 'warn'); }
 }
 
 // ───── Round preset ─────
@@ -185,7 +185,7 @@ document.getElementById('roundDial').addEventListener('click', () => {
 // ───── Marker ─────
 document.getElementById('btnMarker').addEventListener('click', () => promptMarker());
 function promptMarker() {
-  if (!state.session.active) { toast('Start a session first', 'warn'); return; }
+  if (!state.session.active) { toast('เริ่มบันทึกก่อน', 'warn'); return; }
   const label = prompt('Marker note (Enter to skip):', `Round ${state.timer.currentRound} · note`);
   const m = addMarker(label || undefined);
   if (m) toast(`📍 Marker @ ${(m.sessionMs/1000).toFixed(1)}s`, 'ok');

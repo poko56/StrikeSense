@@ -113,6 +113,22 @@ body {
 .meta-v { color: var(--paper); padding-right: 10px; }
 .meta-v.mono { font-family: var(--f-mono); font-weight: 500; }
 
+/* always-on live sensor readout (device responsiveness) */
+.live-sensor {
+  display: inline-flex; align-items: baseline; gap: 6px;
+  font: 600 11px/1 var(--f-body); letter-spacing: .14em; color: var(--paper-3);
+  padding: 4px 9px; border: 1px solid var(--rule); border-radius: 2px;
+  background: var(--ink-2);
+}
+.live-sensor .ls-dot {
+  width: 6px; height: 6px; border-radius: 50%; background: var(--paper-faint);
+  align-self: center; transition: background .2s ease;
+}
+.live-sensor.is-live .ls-dot { background: var(--teal-on); box-shadow: 0 0 6px var(--teal-on); }
+.live-sensor.is-live { color: var(--paper-2); }
+.live-sensor.is-hit .ls-dot { background: var(--blood-bright); box-shadow: 0 0 8px var(--blood-bright); }
+.live-sensor.is-hit .meta-v { color: var(--blood-bright); }
+
 .conn {
   display: inline-flex; align-items: center; gap: 6px;
   font: 600 10.5px/1 var(--f-body); letter-spacing: .18em;
@@ -124,6 +140,8 @@ body {
 .conn.is-off .conn-dot { background: var(--blood); }
 .conn.is-on  { color: var(--teal-on); }
 .conn.is-off { color: var(--blood-bright); }
+.conn.is-wait { color: var(--amber); }
+.conn.is-wait .conn-dot { background: var(--amber); animation: pulseDot 1s ease-in-out infinite; }
 
 /* ════════ LAYOUT ════════ */
 .layout {
@@ -921,14 +939,9 @@ body:not(.is-dev) .logger-block { display: none; }
   .rail-right { order: 3; }
   .stage-top { grid-template-columns: 1fr; }
 }
-@media (max-width: 640px) {
-  .topbar { grid-template-columns: auto 1fr; padding: 0 10px; }
-  .topbar-right { display: none; }
-  .topbar-mid { justify-content: flex-end; }
-  .brand-sub { display: none; }
-  .body-wrap { grid-template-columns: 1fr; }
-  .athlete-meta { grid-template-columns: 1fr; }
-}
+
+/* mobile blocks live at the very end of this file so they override late base
+   rules (.icon-btn, .tab, .chip …) regardless of source order */
 
 /* ════════ UTILS ════════ */
 .mono { font-family: var(--f-mono); font-variant-numeric: tabular-nums; }
@@ -1482,4 +1495,50 @@ body.is-fs .dial-clock { font-size: 56px; }
   background: var(--ink-2); font: 500 9.5px/1.3 var(--f-body); color: var(--paper-3);
 }
 .ai-chip b { color: var(--paper-2); font-weight: 700; }
+
+/* ════════ MOBILE (kept last so it wins over late base rules) ════════ */
+@media (max-width: 760px) {
+  :root { --gap: 12px; }
+  /* topbar wraps to two rows instead of hiding controls — the connection
+     indicator MUST stay visible on mobile (was a reported pain point) */
+  .topbar {
+    grid-template-columns: 1fr auto;
+    grid-auto-rows: auto;
+    row-gap: 6px;
+    padding: 8px 12px;
+    height: auto;
+    align-items: center;
+  }
+  .topbar-mid {
+    grid-column: 1 / -1; order: 3;
+    justify-content: flex-start; flex-wrap: wrap; gap: 8px;
+  }
+  .topbar-right { order: 2; gap: 8px; }
+  .brand-sub { display: none; }
+  .body-wrap { grid-template-columns: 1fr; }
+  .athlete-meta { grid-template-columns: 1fr 1fr; }
+  .stage-top { grid-template-columns: 1fr; }
+  .score-callouts { grid-template-columns: 1fr; }
+
+  /* comfortable tap targets */
+  .icon-btn { width: 40px; height: 40px; font-size: 16px; }
+  .tab { padding: 12px 10px; font-size: 13px; }
+  .chip, .seg-btn, .tbtn { min-height: 34px; }
+  .logger-btn, .ai-upload-btn, .ai-clear-btn, .rec-btn { min-height: 46px; }
+  select, input[type="text"], input[type="search"], .athlete-input {
+    min-height: 42px; font-size: 16px;   /* 16px stops iOS zoom-on-focus */
+  }
+
+  /* wide content scrolls inside its own box, never the page body */
+  .table-wrap, .round-table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  body { overflow-x: hidden; }
+}
+
+@media (max-width: 460px) {
+  .stats-grid { grid-template-columns: 1fr 1fr; }
+  .athlete-meta { grid-template-columns: 1fr; }
+  .topbar-meta { font-size: 10px; letter-spacing: .08em; gap: 4px; }
+  .live-sensor { padding: 3px 7px; }
+  .brand-name { font-size: 15px; }
+}
 

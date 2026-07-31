@@ -12,7 +12,15 @@ let pktCounter = 0;
 let sampleCounter = 0;
 let lastRateAt = performance.now();
 
+let reconnectTimer = null;
+
 export function startWs() {
+  // guard: never open a second socket while one is connecting/open — mobile
+  // wake-ups + timers used to stack connections and cause OFFLINE/LIVE flapping.
+  if (state.ws && (state.ws.readyState === WebSocket.CONNECTING ||
+                   state.ws.readyState === WebSocket.OPEN)) return;
+  if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
   const host  = (location.hostname === 'localhost' || location.hostname === '127.0.0.1')
     ? '192.168.4.1' : location.host;
@@ -27,7 +35,7 @@ export function startWs() {
 
   ws.onopen = () => {
     state.connected = true;
-    backoff = 500;
+    backoff = 400;
     scheduleRender();
   };
   ws.onclose = () => {
@@ -44,8 +52,25 @@ export function startWs() {
 }
 
 function scheduleReconnect() {
-  setTimeout(startWs, backoff);
-  backoff = Math.min(backoff * 1.7, 6000);
+  if (reconnectTimer) return;
+  reconnectTimer = setTimeout(() => { reconnectTimer = null; startWs(); }, backoff);
+  backoff = Math.min(backoff * 1.6, 3000);   // cap lower for snappier mobile recovery
+}
+
+// Reconnect immediately when the phone returns to the app or regains network —
+// mobile browsers suspend sockets on lock/background, which showed as flapping.
+function kick() {
+  if (!state.ws || state.ws.readyState === WebSocket.CLOSED || state.ws.readyState === WebSocket.CLOSING) {
+    backoff = 400;
+    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+    startWs();
+  }
+}
+if (typeof document !== 'undefined') {
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') kick(); });
+  window.addEventListener('online',  kick);
+  window.addEventListener('focus',   kick);
+  window.addEventListener('pageshow', kick);
 }
 
 function decodeFrame(buf) {

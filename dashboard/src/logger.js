@@ -144,6 +144,11 @@ export function logSensorData(sample, slot) {
   const label = selLabel ? selLabel.value : '41';
   const s = (slot | 0);
 
+  // Only capture the limb(s) that belong to this technique. Recording a kick
+  // must not also log idle-hand samples (or slot 0) mislabelled as "kick" —
+  // that pollutes the training set and hurts model accuracy.
+  if (!requiredSides(label).includes(s)) return;
+
   recordedData.push([
     sample.ax.toFixed(4), sample.ay.toFixed(4), sample.az.toFixed(4),
     sample.gx.toFixed(3), sample.gy.toFixed(3), sample.gz.toFixed(3),

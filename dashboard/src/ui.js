@@ -46,23 +46,55 @@ function fmtRelTime(ms) {
 // ───── TOPBAR ─────
 let lastBatteryWarn = new Map();   // mac -> timestamp last warned
 
+// Debounce the connection pill: a real disconnect must persist past this grace
+// window before we show OFFLINE, so brief mobile blips read as "reconnecting"
+// (steady amber) instead of flickering green↔red.
+const CONN_GRACE_MS = 1200;
+let _offlineSince = 0;
+
 function renderTopbar() {
   const conn = $('conn'), txt = $('connTxt');
-  if (state.demoMode) { conn.className = 'conn is-on'; txt.textContent = 'DEMO MODE'; }
-  else if (state.connected) { conn.className = 'conn is-on'; txt.textContent = 'LIVE · WS'; }
-  else { conn.className = 'conn is-off'; txt.textContent = 'OFFLINE · retry'; }
+  if (state.demoMode) {
+    conn.className = 'conn is-on'; txt.textContent = 'โหมดสาธิต';
+  } else if (state.connected) {
+    _offlineSince = 0;
+    conn.className = 'conn is-on'; txt.textContent = 'เชื่อมต่อแล้ว';
+  } else {
+    const now = performance.now();
+    if (!_offlineSince) _offlineSince = now;
+    if (now - _offlineSince > CONN_GRACE_MS) {
+      conn.className = 'conn is-off';  txt.textContent = 'ออฟไลน์ · ลองใหม่';
+    } else {
+      conn.className = 'conn is-wait'; txt.textContent = 'กำลังเชื่อมต่อ…';
+    }
+  }
 
   const t = state.timer;
   $('curRound').textContent = (t.mode === 'idle' || t.mode === 'done')
     ? '—'
     : t.stopwatch ? '∞' : `${t.currentRound}/${t.rounds}`;
-  $('curPhase').textContent = t.mode.toUpperCase();
+  $('curPhase').textContent = PHASE_TH[t.mode] || t.mode.toUpperCase();
   $('curClock').textContent = fmtClock(t.remainingMs);
 
   const pill = $('recPill'), pillTxt = $('recPillTxt');
-  if (state.session.active) { pill.className = 'pill pill-rec'; pillTxt.textContent = 'REC · LIVE'; }
-  else if (t.mode === 'rest') { pill.className = 'pill pill-rest'; pillTxt.textContent = 'REST'; }
-  else { pill.className = 'pill pill-off'; pillTxt.textContent = 'STANDBY'; }
+  if (state.session.active) { pill.className = 'pill pill-rec'; pillTxt.textContent = 'กำลังบันทึก'; }
+  else if (t.mode === 'rest') { pill.className = 'pill pill-rest'; pillTxt.textContent = 'พัก'; }
+  else { pill.className = 'pill pill-off'; pillTxt.textContent = 'พร้อม'; }
+
+  // always-on live sensor readout (device responsiveness, independent of recording)
+  const ls = $('liveSensor'), lg = $('liveG');
+  if (ls && lg) {
+    const la = state.liveActivity;
+    const now = performance.now();
+    const decay = Math.max(0, 1 - (now - la.peakHoldMs) / 900);   // fade the peak hold
+    const g = la.maxG * decay;
+    if (decay <= 0) la.maxG = 0;
+    lg.textContent = g.toFixed(1);
+    const fresh   = (Date.now() - la.lastSampleMs) < 2500;         // data arriving = responsive
+    const hitPulse= (Date.now() - la.lastHitMs) < 350;
+    ls.classList.toggle('is-live', fresh);
+    ls.classList.toggle('is-hit', hitPulse);
+  }
 
   // active state on toggle icon buttons
   $('btnHeatmap').classList.toggle('is-on', state.ui.bodyHeatmap);
@@ -80,15 +112,18 @@ function renderDial() {
   $('roundDial').classList.toggle('is-rest', t.mode === 'rest');
 
   $('dialClock').textContent = fmtClock(t.remainingMs);
-  $('dialPhase').textContent = (t.mode === 'idle' ? 'READY'
-                              : t.mode === 'done' ? 'COMPLETE'
-                              : t.stopwatch ? 'STOPWATCH' : t.mode.toUpperCase());
-  $('dialRound').textContent = t.stopwatch ? '— · free —' : `Round ${t.currentRound || '—'} / ${t.rounds}`;
+  $('dialPhase').textContent = (t.mode === 'idle' ? 'พร้อม'
+                              : t.mode === 'done' ? 'จบแล้ว'
+                              : t.stopwatch ? 'จับเวลา' : PHASE_TH[t.mode] || t.mode.toUpperCase());
+  $('dialRound').textContent = t.stopwatch ? '— · อิสระ —' : `ยก ${t.currentRound || '—'} / ${t.rounds}`;
 
   const btn = $('btnRec'), lbl = $('btnRecLabel');
-  if (state.session.active) { btn.classList.add('is-rec'); lbl.textContent = 'STOP'; }
-  else { btn.classList.remove('is-rec'); lbl.textContent = 'RECORD'; }
+  if (state.session.active) { btn.classList.add('is-rec'); lbl.textContent = 'หยุด'; }
+  else { btn.classList.remove('is-rec'); lbl.textContent = 'บันทึก'; }
 }
+
+// timer phase → Thai (used by dial + topbar)
+const PHASE_TH = { idle: 'พร้อม', work: 'ชก', rest: 'พัก', done: 'จบ' };
 
 // ───── STATS ─────
 function renderStats() {
@@ -239,13 +274,14 @@ function renderDistribution() {
   const lPct = totalLR ? (state.leftCount / totalLR * 100) : 50;
   $('asymL').style.width = `${lPct}%`;
   $('asymR').style.width = `${100 - lPct}%`;
-  $('asymLtxt').textContent = `L ${state.leftCount}`;
-  $('asymRtxt').textContent = `R ${state.rightCount}`;
+  $('asymLtxt').textContent = `ซ้าย ${state.leftCount}`;
+  $('asymRtxt').textContent = `ขวา ${state.rightCount}`;
 
   const fat = computeFatigue();
   $('fatigueFill').style.width = `${fat.pct}%`;
-  $('fatigueTxt').textContent  = `${fat.pct}% · ${fat.label} · CV ${(computeCv()*100).toFixed(0)}%`;
+  $('fatigueTxt').textContent  = `${fat.pct}% · ${FATIGUE_TH[fat.label] || fat.label} · CV ${(computeCv()*100).toFixed(0)}%`;
 }
+const FATIGUE_TH = { 'stable': 'คงที่', 'fatiguing': 'เริ่มล้า', 'severely fatigued': 'ล้ามาก' };
 
 // ───── GOALS ─────
 function renderGoals() {

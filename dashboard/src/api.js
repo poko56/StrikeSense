@@ -22,4 +22,17 @@ export const api = {
   sessions:      ()         => json('/api/sessions'),
   sessionDelete: (id)       => json('/api/sessions/' + encodeURIComponent(id), { method: 'DELETE' }),
   sessionDownloadUrl: (id)  => BASE + '/api/sessions/' + encodeURIComponent(id),
+
+  // ── AI model persisted on the Main Node SD card ──
+  // returns the parsed model, or null if none is stored (404)
+  modelGet: async () => {
+    const res = await fetch(BASE + '/api/model', { cache: 'no-store' });
+    if (res.status === 404) return null;
+    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+    return res.json();
+  },
+  modelUpload: (jsonText) => json('/api/model', {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: jsonText,
+  }),
+  modelDelete: () => json('/api/model', { method: 'DELETE' }),
 };

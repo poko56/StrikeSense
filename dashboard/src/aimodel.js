@@ -7,6 +7,11 @@
 // live IMU stream so gesture detection runs fully offline, and the model
 // file never has to be baked into firmware.
 //
+// Persistence: on upload the model is POSTed to the Main Node and stored on the
+// SD card (/api/model). Any phone that connects afterwards auto-loads it from SD,
+// so you upload once per rig, not once per device. localStorage is a local cache
+// fallback. No model → detection still shows live G/values, just no gesture label.
+//
 // Data flow:
 //   ws.js       -> aiPushSample(slot, rawSample)   per decoded IMU sample (400 Hz, RAW — matches training CSV)
 //   analyzer.js -> aiOnStrike(slot)                on each detected strike → classify the recent window
@@ -20,6 +25,9 @@
 import { state } from './state.js';
 import { persist } from './persist.js';
 import { parseModel, forward } from './ainet.js';
+import { api } from './api.js';
+
+const isDemo = () => new URLSearchParams(location.search).get('demo') === '1';
 
 const LS_KEY   = 'strikesense.aiModel';   // localStorage: last uploaded model (survives reload)
 const RING_CAP = 128;                      // raw samples kept per slot (≥ time_steps)
@@ -89,13 +97,13 @@ export function aiOnStrike(slot) {
 }
 
 // ───────────────────────── model load / clear ─────────────────────────
-function activate(doc, { save = true } = {}) {
-  net = parseModel(doc);
+function activate(doc) {
+  net = parseModel(doc);           // throws on bad model → caller handles
   state.ai.ready = true;
   state.ai.meta  = net.meta;
   state.ai.error = '';
-  state.ai.rawBySlot.clear();   // feature count may have changed
-  if (save) { try { persist.set(LS_KEY, doc); } catch (e) { /* quota — keep in memory */ } }
+  state.ai.rawBySlot.clear();      // feature count may have changed
+  try { persist.set(LS_KEY, doc); } catch (e) { /* quota — SD is the source of truth */ }
 }
 
 function clearModel() {
@@ -105,27 +113,61 @@ function clearModel() {
   state.ai.meta = null;
   state.ai.last = null;
   state.ai.error = '';
+  state.ai.source = '';
   state.ai.history.length = 0;
   state.ai.rawBySlot.clear();
   try { persist.set(LS_KEY, null); } catch (e) {}
+  if (!isDemo()) api.modelDelete().catch(() => { /* device offline — local clear is enough */ });
 }
 
+// Load a freshly uploaded file: parse → enable → push to the Main Node SD card.
 function handleFile(file) {
   const reader = new FileReader();
   reader.onload = () => {
+    let doc;
     try {
-      const doc = JSON.parse(reader.result);
+      doc = JSON.parse(reader.result);
       activate(doc);
-      state.ai.enabled = true;   // auto-enable on successful upload
     } catch (e) {
-      state.ai.ready = false;
-      state.ai.meta = null;
+      state.ai.ready = false; state.ai.meta = null;
       state.ai.error = e.message || 'อ่านไฟล์ไม่สำเร็จ';
+      renderAiModel();
+      return;
     }
-    renderAiModel();
+    state.ai.enabled = true;         // auto-enable on successful upload
+    state.ai.source  = 'local';
+
+    if (!isDemo()) {                 // persist to the rig's SD card
+      state.ai.saving = true;
+      state.ai.error  = '';
+      renderAiModel();
+      api.modelUpload(JSON.stringify(doc))
+        .then(() => { state.ai.source = 'sd'; })
+        .catch(() => { state.ai.error = '⚠ บันทึกลง SD ไม่สำเร็จ — ใช้ได้เฉพาะเครื่องนี้'; })
+        .finally(() => { state.ai.saving = false; renderAiModel(); });
+    } else {
+      renderAiModel();
+    }
   };
   reader.onerror = () => { state.ai.error = 'อ่านไฟล์ไม่สำเร็จ'; renderAiModel(); };
   reader.readAsText(file);
+}
+
+// Startup: prefer the model stored on the rig's SD card so any device gets it;
+// fall back to this browser's local cache when the device has none / is offline.
+async function loadInitialModel() {
+  if (!isDemo()) {
+    try {
+      const doc = await api.modelGet();
+      if (doc) { activate(doc); state.ai.source = 'sd'; renderAiModel(); return; }
+    } catch (e) { /* device unreachable → try local cache below */ }
+  }
+  const saved = persist.get(LS_KEY, null);
+  if (saved) {
+    try { activate(saved); state.ai.source = 'local'; }
+    catch (e) { state.ai.error = e.message; }
+  }
+  renderAiModel();
 }
 
 // ───────────────────────── UI ─────────────────────────
@@ -151,10 +193,8 @@ export function initAiModel() {
     renderAiModel();
   });
 
-  // restore a previously uploaded model
-  const saved = persist.get(LS_KEY, null);
-  if (saved) { try { activate(saved, { save: false }); } catch (e) { state.ai.error = e.message; } }
-  renderAiModel();
+  // restore from SD card (preferred) or this browser's local cache
+  loadInitialModel();
 }
 
 const SLOT_TAG = ['—', 'L-HAND', 'R-HAND', 'L-SHIN', 'R-SHIN'];
@@ -163,15 +203,20 @@ export function renderAiModel() {
   if (!elStatus) return;
   const ai = state.ai;
 
-  if (ai.error) {
+  if (ai.saving) {
+    elStatus.textContent = '⏳ กำลังบันทึกโมเดลลง SD card…';
+    elStatus.className = 'ai-status';
+  } else if (ai.error) {
     elStatus.textContent = '⚠ ' + ai.error;
     elStatus.className = 'ai-status err';
   } else if (ai.ready) {
     const m = ai.meta;
-    elStatus.textContent = `พร้อม · ${m.labels.length} ท่า · หน้าต่าง ${m.time_steps}×${m.features} · โหมด ${m.label_mode}`;
+    const where = ai.source === 'sd' ? 'SD card' : ai.source === 'local' ? 'เครื่องนี้' : '';
+    elStatus.textContent = `พร้อม · ${m.labels.length} ท่า · หน้าต่าง ${m.time_steps}×${m.features}`
+                         + (where ? ` · เก็บที่ ${where}` : '');
     elStatus.className = 'ai-status ok';
   } else {
-    elStatus.textContent = 'ยังไม่ได้โหลดโมเดล — อัปโหลด strike_web_model.json';
+    elStatus.textContent = 'ยังไม่ได้โหลดโมเดล — ตรวจจับแรง G ได้ แต่ยังแยกท่าไม่ได้';
     elStatus.className = 'ai-status';
   }
 

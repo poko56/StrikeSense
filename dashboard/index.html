@@ -28,18 +28,22 @@
     <div class="topbar-mid">
       <span id="recPill" class="pill pill-off"><span class="pill-dot"></span><span id="recPillTxt">STANDBY</span></span>
       <span class="topbar-meta">
-        <span class="meta-k">ROUND</span><span class="meta-v" id="curRound">—</span>
-        <span class="meta-k">PHASE</span><span class="meta-v" id="curPhase">—</span>
-        <span class="meta-k">CLOCK</span><span class="meta-v mono" id="curClock">00:00</span>
+        <span class="meta-k">ยก</span><span class="meta-v" id="curRound">—</span>
+        <span class="meta-k">ช่วง</span><span class="meta-v" id="curPhase">—</span>
+        <span class="meta-k">เวลา</span><span class="meta-v mono" id="curClock">00:00</span>
+      </span>
+      <span class="live-sensor" id="liveSensor" title="เซนเซอร์สด — อุปกรณ์ยังตอบสนองต่อค่าแรง G">
+        <span class="ls-dot"></span>
+        <span class="meta-k">แรง G</span><span class="meta-v mono" id="liveG">0.0</span>
       </span>
     </div>
 
     <div class="topbar-right">
-      <button class="icon-btn" id="btnTheme" title="Toggle theme (T)">◐</button>
-      <button class="icon-btn" id="btnHeatmap" title="Toggle body heatmap (H)">▦</button>
-      <button class="icon-btn" id="btnFullscreen" title="Fullscreen (F)">⛶</button>
-      <button class="icon-btn" id="btnHelp" title="Shortcuts (?)">?</button>
-      <span class="conn" id="conn"><span class="conn-dot"></span><span id="connTxt">Connecting…</span></span>
+      <button class="icon-btn" id="btnTheme" title="สลับธีมสว่าง/มืด (T)">◐</button>
+      <button class="icon-btn" id="btnHeatmap" title="สลับฮีตแมปร่างกาย (H)">▦</button>
+      <button class="icon-btn" id="btnFullscreen" title="เต็มจอ (F)">⛶</button>
+      <button class="icon-btn" id="btnHelp" title="ปุ่มลัด (?)">?</button>
+      <span class="conn" id="conn"><span class="conn-dot"></span><span id="connTxt">กำลังเชื่อมต่อ…</span></span>
     </div>
   </header>
 
@@ -93,50 +97,50 @@
             <text x="110" y="158" text-anchor="middle" class="dial-round" id="dialRound">— / —</text>
           </svg>
           <button class="rec-btn" id="btnRec" type="button">
-            <span class="rec-dot"></span><span class="rec-label" id="btnRecLabel">RECORD</span>
+            <span class="rec-dot"></span><span class="rec-label" id="btnRecLabel">บันทึก</span>
           </button>
         </div>
 
         <div class="dial-controls">
-          <button class="tbtn" id="btnRoundReset" type="button">RESET</button>
-          <button class="tbtn" id="btnRoundSkip" type="button">SKIP&nbsp;»</button>
-          <button class="tbtn" id="btnMarker" type="button" title="Add marker (M)">+ MARKER</button>
-          <label class="check"><input type="checkbox" id="autoRec" checked> auto&nbsp;rec/round</label>
+          <button class="tbtn" id="btnRoundReset" type="button">รีเซ็ต</button>
+          <button class="tbtn" id="btnRoundSkip" type="button">ข้าม&nbsp;»</button>
+          <button class="tbtn" id="btnMarker" type="button" title="เพิ่มมาร์กเกอร์ (M)">+ มาร์ก</button>
+          <label class="check"><input type="checkbox" id="autoRec" checked> บันทึกอัตโนมัติ/ยก</label>
         </div>
       </section>
 
       <!-- Session stats -->
       <section class="block stats-block">
-        <div class="kicker">SESSION TOTALS</div>
+        <div class="kicker">สรุปเซสชัน · SESSION</div>
         <div class="stats-grid">
           <div class="stat">
-            <div class="stat-lbl">PEAK</div>
+            <div class="stat-lbl">แรงสูงสุด</div>
             <div class="stat-val mono" id="stPeak"><span class="stat-num">0.0</span><span class="stat-unit">g</span>
             </div>
           </div>
           <div class="stat">
-            <div class="stat-lbl">AVG</div>
+            <div class="stat-lbl">เฉลี่ย</div>
             <div class="stat-val mono" id="stAvg"><span class="stat-num">0.0</span><span class="stat-unit">g</span>
             </div>
           </div>
           <div class="stat">
-            <div class="stat-lbl">STRIKES</div>
+            <div class="stat-lbl">จำนวนครั้ง</div>
             <div class="stat-val mono" id="stCount">0</div>
           </div>
           <div class="stat">
-            <div class="stat-lbl">SPM</div>
+            <div class="stat-lbl">ครั้ง/นาที</div>
             <div class="stat-val mono" id="stSpm">0</div>
           </div>
           <div class="stat">
-            <div class="stat-lbl">TIME-ON-TARGET</div>
+            <div class="stat-lbl">เวลาออกอาวุธ</div>
             <div class="stat-val mono" id="stToT">0<span class="stat-unit">%</span></div>
           </div>
           <div class="stat">
-            <div class="stat-lbl">WORK</div>
+            <div class="stat-lbl">พลังงาน</div>
             <div class="stat-val mono" id="stWork">0.0<span class="stat-unit">kJ</span></div>
           </div>
           <div class="stat span2">
-            <div class="stat-lbl">SESSION TIME</div>
+            <div class="stat-lbl">เวลาเซสชัน</div>
             <div class="stat-val mono big" id="stDuration">00:00:00</div>
           </div>
         </div>
@@ -145,39 +149,39 @@
       <!-- Goals -->
       <section class="block goals-block">
         <div class="block-head">
-          <div class="kicker">TRAINING GOAL</div>
-          <button class="chip ghost" id="btnEditGoals" type="button">EDIT</button>
+          <div class="kicker">เป้าหมายซ้อม · GOAL</div>
+          <button class="chip ghost" id="btnEditGoals" type="button">แก้ไข</button>
         </div>
         <div class="goal-row">
-          <span class="goal-name">STRIKES</span>
+          <span class="goal-name">จำนวนครั้ง</span>
           <div class="goal-bar"><span class="goal-fill" id="goalStrFill"></span></div>
           <span class="goal-text mono" id="goalStrTxt">0 / 100</span>
         </div>
         <div class="goal-row">
-          <span class="goal-name">PEAK ≥</span>
+          <span class="goal-name">แรง ≥</span>
           <div class="goal-bar"><span class="goal-fill" id="goalPeakFill"></span></div>
           <span class="goal-text mono" id="goalPeakTxt">0 / 8 g</span>
         </div>
-        <div class="goal-status" id="goalStatus">— set a target, hit it, repeat —</div>
+        <div class="goal-status" id="goalStatus">— ตั้งเป้า แล้วทำให้ถึง ทำซ้ำ —</div>
       </section>
 
       <!-- Per-round summary -->
       <section class="block round-summary">
-        <div class="kicker">ROUND-BY-ROUND</div>
+        <div class="kicker">รายยก · ROUND</div>
         <div class="round-table-wrap">
           <table class="round-table mono" id="roundTbl">
             <thead>
               <tr>
-                <th>R</th>
-                <th class="num">STR</th>
-                <th class="num">PEAK</th>
-                <th class="num">AVG</th>
-                <th class="num">FATIG</th>
+                <th>ยก</th>
+                <th class="num">ครั้ง</th>
+                <th class="num">สูงสุด</th>
+                <th class="num">เฉลี่ย</th>
+                <th class="num">ล้า</th>
               </tr>
             </thead>
             <tbody id="roundTbody">
               <tr class="empty">
-                <td colspan="5">— round summary will appear here —</td>
+                <td colspan="5">— สรุปแต่ละยกจะแสดงที่นี่ —</td>
               </tr>
             </tbody>
           </table>
@@ -186,9 +190,9 @@
 
       <!-- Activity feed -->
       <section class="block activity-block">
-        <div class="kicker">RECENT ACTIVITY</div>
+        <div class="kicker">กิจกรรมล่าสุด · ACTIVITY</div>
         <ul class="activity-list" id="activityList">
-          <li class="dim">— no activity yet —</li>
+          <li class="dim">— ยังไม่มีกิจกรรม —</li>
         </ul>
       </section>
 
@@ -308,10 +312,10 @@
 
         <div class="block body-block">
           <div class="block-head">
-            <div class="kicker">HIT ZONES</div>
+            <div class="kicker">จุดที่โดน · HIT ZONES</div>
             <span class="seg-toggle">
-              <button class="seg-btn seg-on" data-bmode="live" id="bmLive">LIVE</button>
-              <button class="seg-btn" data-bmode="heat" id="bmHeat">HEATMAP</button>
+              <button class="seg-btn seg-on" data-bmode="live" id="bmLive">สด</button>
+              <button class="seg-btn" data-bmode="heat" id="bmHeat">ฮีตแมป</button>
             </span>
           </div>
           <div class="body-wrap">
@@ -353,10 +357,10 @@
 
         <!-- Distribution / histogram / asym / fatigue -->
         <div class="block dist-block">
-          <div class="kicker">STRIKE DISTRIBUTION</div>
+          <div class="kicker">การกระจายท่า · DISTRIBUTION</div>
           <div class="dist-list" id="distList"></div>
 
-          <div class="kicker tiny mt-4">FORCE HISTOGRAM</div>
+          <div class="kicker tiny mt-4">ฮิสโตแกรมแรง · FORCE</div>
           <div class="hist" id="histBars">
             <div class="hist-bar" data-range="1-3"><span class="hist-fill"></span><span
                 class="hist-lbl">1-3g</span><span class="hist-cnt">0</span></div>
@@ -368,13 +372,13 @@
                 class="hist-lbl">10+g</span><span class="hist-cnt">0</span></div>
           </div>
 
-          <div class="kicker tiny mt-4">ASYMMETRY · L vs R</div>
+          <div class="kicker tiny mt-4">สมดุลซ้าย-ขวา · L vs R</div>
           <div class="asym-bar"><span class="asym-l" id="asymL"></span><span class="asym-r" id="asymR"></span></div>
-          <div class="asym-meta"><span id="asymLtxt">L 0</span><span id="asymRtxt">R 0</span></div>
+          <div class="asym-meta"><span id="asymLtxt">ซ้าย 0</span><span id="asymRtxt">ขวา 0</span></div>
 
-          <div class="kicker tiny mt-4">FATIGUE INDEX</div>
+          <div class="kicker tiny mt-4">ดัชนีความล้า · FATIGUE</div>
           <div class="fatigue-wrap"><span class="fatigue-fill" id="fatigueFill"></span></div>
-          <div class="fatigue-meta"><span id="fatigueTxt">— · stable</span></div>
+          <div class="fatigue-meta"><span id="fatigueTxt">— · คงที่</span></div>
         </div>
       </div>
 
@@ -414,8 +418,8 @@
       <!-- Session timeline + strike log -->
       <div class="block strike-log">
         <div class="block-head">
-          <div class="kicker">SESSION TIMELINE</div>
-          <span class="dim small">click a strike to inspect · click empty area to add marker</span>
+          <div class="kicker">ไทม์ไลน์เซสชัน · TIMELINE</div>
+          <span class="dim small">แตะที่จุดเพื่อดูรายละเอียด · แตะพื้นที่ว่างเพื่อเพิ่มมาร์กเกอร์</span>
         </div>
         <div class="timeline" id="timeline">
           <div class="tl-track" id="tlTrack"></div>
@@ -423,15 +427,15 @@
         </div>
 
         <div class="block-head mt-4">
-          <div class="kicker">STRIKE LOG</div>
+          <div class="kicker">บันทึกการออกอาวุธ · LOG</div>
           <div class="chip-row">
-            <button class="chip chip-on" data-filter="all">ALL</button>
-            <button class="chip" data-filter="1">LH</button>
-            <button class="chip" data-filter="2">RH</button>
-            <button class="chip" data-filter="3">LS</button>
-            <button class="chip" data-filter="4">RS</button>
+            <button class="chip chip-on" data-filter="all">ทั้งหมด</button>
+            <button class="chip" data-filter="1">มือซ้าย</button>
+            <button class="chip" data-filter="2">มือขวา</button>
+            <button class="chip" data-filter="3">แข้งซ้าย</button>
+            <button class="chip" data-filter="4">แข้งขวา</button>
             <span class="flex-spacer"></span>
-            <button class="chip ghost" id="btnClearLog">CLEAR</button>
+            <button class="chip ghost" id="btnClearLog">ล้าง</button>
           </div>
         </div>
         <div class="table-wrap">
@@ -439,18 +443,18 @@
             <thead>
               <tr>
                 <th>#</th>
-                <th>TIME</th>
-                <th>R</th>
-                <th>SLOT</th>
-                <th>TYPE</th>
-                <th class="num">PEAK·g</th>
+                <th>เวลา</th>
+                <th>ยก</th>
+                <th>ตำแหน่ง</th>
+                <th>ท่า</th>
+                <th class="num">แรง·g</th>
                 <th class="num">ω·°/s</th>
-                <th class="num">REC·ms</th>
+                <th class="num">พัก·ms</th>
               </tr>
             </thead>
             <tbody id="strikeTbody">
               <tr class="empty">
-                <td colspan="8">— ยังไม่มีหมัด · waiting for strikes —</td>
+                <td colspan="8">— ยังไม่มีการออกอาวุธ —</td>
               </tr>
             </tbody>
           </table>
@@ -470,40 +474,39 @@
       <!-- SENSORS -->
       <section class="block tabpane on" data-pane="sensors">
         <div class="sensors-head">
-          <div class="kicker">CONNECTED NODES</div>
-          <button class="cal-all-btn" id="btnCalAll" title="Calibrate every assigned node at once">⊕ CALIBRATE ALL</button>
+          <div class="kicker">โหนดที่เชื่อมต่อ · NODES</div>
+          <button class="cal-all-btn" id="btnCalAll" title="คาลิเบรตทุกโหนดพร้อมกัน">⊕ คาลิเบรตทั้งหมด</button>
         </div>
         <div class="node-list" id="nodeList">
-          <div class="empty-card">— No nodes detected —<br><span class="dim">Power on a Strike Node within 2 m of the
-              Main Node.</span></div>
+          <div class="empty-card">— ไม่พบโหนด —<br><span class="dim">เปิด Strike Node ให้อยู่ในระยะ 2 เมตรจากโหนดหลัก</span></div>
         </div>
 
-        <div class="kicker mt-4">MARKERS · SESSION</div>
+        <div class="kicker mt-4">มาร์กเกอร์ · MARKERS</div>
         <ul class="marker-list" id="markerList">
-          <li class="dim">— no markers yet · press M during session —</li>
+          <li class="dim">— ยังไม่มีมาร์กเกอร์ · กด M ระหว่างบันทึก —</li>
         </ul>
       </section>
 
       <!-- LIBRARY -->
       <section class="block tabpane" data-pane="library">
         <div class="block-head">
-          <div class="kicker">SESSION LIBRARY · SD CARD</div>
-          <button class="chip ghost" id="btnRefreshLib" type="button">↻ REFRESH</button>
+          <div class="kicker">คลังเซสชัน · SD CARD</div>
+          <button class="chip ghost" id="btnRefreshLib" type="button">↻ รีเฟรช</button>
         </div>
-        <input class="search" id="libSearch" type="search" placeholder="Search by id…">
+        <input class="search" id="libSearch" type="search" placeholder="ค้นหาด้วยรหัสเซสชัน…">
         <div class="lib-stats">
-          <span><span class="meta-k">TOTAL</span> <span class="mono" id="libCount">0</span></span>
-          <span><span class="meta-k">SIZE</span> <span class="mono" id="libSize">— KB</span></span>
-          <span><span class="meta-k">CARD</span> <span class="mono" id="libCard">— / —</span></span>
+          <span><span class="meta-k">ทั้งหมด</span> <span class="mono" id="libCount">0</span></span>
+          <span><span class="meta-k">ขนาด</span> <span class="mono" id="libSize">— KB</span></span>
+          <span><span class="meta-k">การ์ด</span> <span class="mono" id="libCard">— / —</span></span>
         </div>
         <div class="compare-bar">
-          <span class="meta-k">SELECTED</span>
+          <span class="meta-k">เลือกไว้</span>
           <span class="mono" id="cmpCount">0</span>
-          <button class="chip ghost" id="btnCompareOpen" disabled>COMPARE</button>
-          <button class="chip ghost" id="btnCompareClear">CLEAR</button>
+          <button class="chip ghost" id="btnCompareOpen" disabled>เปรียบเทียบ</button>
+          <button class="chip ghost" id="btnCompareClear">ล้าง</button>
         </div>
         <div class="lib-list" id="libList">
-          <div class="empty-card">— Library empty —</div>
+          <div class="empty-card">— คลังว่าง —</div>
         </div>
       </section>
 
@@ -511,7 +514,7 @@
       <section class="block tabpane" data-pane="system">
         <div class="dev-toggle-row">
           <div>
-            <div class="kicker">DEVELOPER MODE</div>
+            <div class="kicker">โหมดนักพัฒนา · DEV</div>
             <div class="dim small">แสดงเครื่องมือเก็บข้อมูลเทรน AI (หรือกด <b>D</b> / เปิดด้วย <span class="mono">?dev=1</span>)</div>
           </div>
           <label class="switch">
@@ -521,7 +524,7 @@
         </div>
         <button class="tour-launch" id="btnStartTour" type="button">🎓 เริ่มทัวร์แนะนำการใช้งาน</button>
 
-        <div class="kicker mt-4">MAIN NODE</div>
+        <div class="kicker mt-4">โหนดหลัก · MAIN NODE</div>
         <table class="kv-table mono">
           <tr>
             <td>IP</td>
@@ -569,23 +572,23 @@
           </tr>
         </table>
 
-        <div class="kicker mt-4">DETECTION TUNING</div>
+        <div class="kicker mt-4">ตั้งค่าการตรวจจับ · TUNING</div>
         <label class="row-inline">
-          <span class="meta-k">THRESHOLD</span>
+          <span class="meta-k">เกณฑ์แรง</span>
           <input type="range" id="thrSlider" min="1.5" max="10" step="0.1" value="3.0">
           <span class="mono" id="thrVal">3.0 g</span>
         </label>
         <label class="row-inline">
-          <span class="meta-k">REFRACTORY</span>
+          <span class="meta-k">หน่วงเวลา</span>
           <input type="range" id="refrSlider" min="100" max="800" step="10" value="250">
           <span class="mono" id="refrVal">250 ms</span>
         </label>
 
-        <div class="kicker mt-4">SD CARD</div>
+        <div class="kicker mt-4">เอสดีการ์ด · SD</div>
         <div class="bar"><span class="bar-fill" id="sdBarFill"></span></div>
-        <div class="bar-meta mono"><span id="sdUsedTxt">— used</span><span id="sdFreeTxt">— free</span></div>
+        <div class="bar-meta mono"><span id="sdUsedTxt">— ใช้ไป</span><span id="sdFreeTxt">— ว่าง</span></div>
 
-        <div class="kicker mt-4">ABOUT</div>
+        <div class="kicker mt-4">เกี่ยวกับ · ABOUT</div>
         <table class="kv-table mono">
           <tr>
             <td>BUILD</td>

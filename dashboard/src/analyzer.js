@@ -87,6 +87,12 @@ export function ingestBatch({ slot, rssi, mac, samples, seq, recvMs }) {
     live.peakHoldMs = nowPerf;
   }
 
+  // always-on sensor activity — updated every packet regardless of recording,
+  // so the user can see the rig is alive and reacting to G before pressing REC.
+  const la = state.liveActivity;
+  if (maxG > la.maxG) { la.maxG = maxG; la.peakHoldMs = nowPerf; }
+  la.lastSampleMs = Date.now();
+
   // Track active time (only count packets while session active)
   if (state.session.active) {
     state.activeMsByWindow.push({ t: nowPerf, mag: live.rmsG });
@@ -95,25 +101,26 @@ export function ingestBatch({ slot, rssi, mac, samples, seq, recvMs }) {
     while (state.activeMsByWindow.length && state.activeMsByWindow[0].t < cutoff) state.activeMsByWindow.shift();
   }
 
-  // strike detection
+  // strike detection — always fires (live feedback + gesture preview). Whether it
+  // COUNTS toward the session stats/radar is gated on recording below.
+  const recording = state.session.active || state.demoMode;
   const lastStrikeAt = state.lastStrikeBySlot.get(slot) || 0;
   if (maxG >= state.tuning.thresholdG && (nowPerf - lastStrikeAt) >= state.tuning.refractoryMs) {
     state.lastStrikeBySlot.set(slot, nowPerf);
-    recordStrike({ slot, peakG: maxG, peakDps: maxDps, recvMs: recvMs ?? Date.now(), seq });
+    la.lastHitMs = Date.now();
+    state.ui.bodyHitFlash.set(slot, nowPerf);          // body-map flash works even when idle
+    const ai = aiOnStrike(slot);                        // gesture preview runs live too
+    if (recording) recordStrike({ slot, peakG: maxG, peakDps: maxDps, recvMs: recvMs ?? Date.now(), seq, ai });
   }
 
   scheduleRender();
 }
 
-function recordStrike({ slot, peakG, peakDps, recvMs, seq }) {
+function recordStrike({ slot, peakG, peakDps, recvMs, seq, ai }) {
   const sessionT = state.session.active ? (recvMs - state.session.startedAtMs) : 0;
   const type     = classifyStrike(slot, peakG, peakDps);
   const lastT    = state.strikes.length ? state.strikes[state.strikes.length - 1].sessionMs : 0;
   const recoverMs= sessionT - lastT;
-
-  // AI technique classification (in-browser 1D-CNN) — no-op unless a model is
-  // loaded and enabled. Runs on the raw window ending at this strike.
-  const ai = aiOnStrike(slot);
 
   const ev = {
     id:        ++state.strikeSeq,
@@ -142,8 +149,6 @@ function recordStrike({ slot, peakG, peakDps, recvMs, seq }) {
   state.fatigueHistory.push({ t: recvMs, g: peakG });
   const cutoff = recvMs - state.tuning.fatigueWindow * 2;
   while (state.fatigueHistory.length && state.fatigueHistory[0].t < cutoff) state.fatigueHistory.shift();
-
-  state.ui.bodyHitFlash.set(slot, performance.now());
 
   // Goal completion check
   checkGoalCompletion();

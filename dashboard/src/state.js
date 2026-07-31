@@ -65,6 +65,10 @@ export const state = {
   // live IMU per slot
   liveBySlot: new Map(), // slot -> { mac, lastSamples, peakG, peakHoldMs, rmsG, lastSeenMs, lastRssi, waveform: Float32Array, waveIdx }
 
+  // always-on sensor activity — proves the rig is connected + responding even
+  // when NOT recording (recording only gates the session stats / radar / eval).
+  liveActivity: { maxG: 0, peakHoldMs: 0, lastHitMs: 0, lastSampleMs: 0 },
+
   // strikes
   strikes:          [],
   strikeSeq:        0,
@@ -119,6 +123,8 @@ export const state = {
     ready:     false,            // a valid model is loaded
     meta:      null,             // { labels[], time_steps, features, label_mode, created }
     error:     '',               // last load error (shown in panel)
+    source:    '',               // 'sd' | 'local' — where the active model came from
+    saving:    false,            // uploading model to the SD card
     rawBySlot: new Map(),        // slot -> { buf:Float32Array(CAP*FEATURES), idx, count }  raw IMU ring
     last:      null,             // { slot, label, conf, at, probs:number[] }  most recent detection
     history:   [],               // recent detections [{ slot, label, conf, at }]

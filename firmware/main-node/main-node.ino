@@ -698,9 +698,12 @@ namespace WebServerApp {
     }
 
     static void registerRoutes() {
-        // ---- Embedded dashboard ----
+        // ---- Embedded dashboard (gzip-compressed → fast first paint on mobile) ----
         auto sendDashboard = [](AsyncWebServerRequest* req) {
-            AsyncWebServerResponse* resp = req->beginResponse_P(200, "text/html", DASHBOARD_HTML);
+            AsyncWebServerResponse* resp = req->beginResponse_P(
+                200, "text/html", DASHBOARD_HTML_GZ, DASHBOARD_HTML_GZ_LEN);
+            resp->addHeader("Content-Encoding", "gzip");
+            resp->addHeader("Cache-Control", "public, max-age=86400");
             req->send(resp);
         };
         g_http.on("/",           HTTP_GET, sendDashboard);
@@ -885,6 +888,57 @@ namespace WebServerApp {
             req->send(ok ? 200 : 404, "application/json",
                       ok ? "{\"ok\":true}" : "{\"error\":\"not found\"}");
         });
+
+        // ════════ AI MODEL on SD card ════════
+        // Upload once → stored on the card → any phone that connects auto-loads it
+        // and runs gesture inference in-browser. No model = normal detection only.
+        static const char* MODEL_PATH = "/model.json";
+
+        // ---- GET /api/model (download the stored model, or 404) ----
+        g_http.on("/api/model", HTTP_GET, [](AsyncWebServerRequest* req) {
+            if (!SdLogger::isReady() || !SD.exists(MODEL_PATH)) {
+                req->send(404, "application/json", "{\"error\":\"no model\"}");
+                return;
+            }
+            AsyncWebServerResponse* resp = req->beginResponse(SD, MODEL_PATH, "application/json");
+            resp->addHeader("Cache-Control", "no-store");
+            req->send(resp);
+        });
+
+        // ---- DELETE /api/model ----
+        g_http.on("/api/model", HTTP_DELETE, [](AsyncWebServerRequest* req) {
+            if (SdLogger::isReady() && SD.exists(MODEL_PATH)) SD.remove(MODEL_PATH);
+            req->send(200, "application/json", "{\"ok\":true}");
+        });
+
+        // ---- POST /api/model (stream the uploaded JSON straight to SD) ----
+        static File s_modelUp;
+        static bool s_modelUpOk = false;
+        g_http.on("/api/model", HTTP_POST,
+            [](AsyncWebServerRequest* req) {
+                req->send(s_modelUpOk ? 200 : 500, "application/json",
+                          s_modelUpOk ? "{\"ok\":true}" : "{\"error\":\"sd write failed\"}");
+            },
+            nullptr,
+            [](AsyncWebServerRequest* req, uint8_t* data, size_t len, size_t index, size_t total) {
+                if (index == 0) {   // first chunk → (re)open the file
+                    s_modelUpOk = false;
+                    if (!SdLogger::isReady()) return;
+                    if (SD.exists(MODEL_PATH)) SD.remove(MODEL_PATH);
+                    s_modelUp = SD.open(MODEL_PATH, FILE_WRITE);
+                    if (!s_modelUp) return;
+                }
+                if (s_modelUp) s_modelUp.write(data, len);
+                if (index + len >= total) {   // last chunk → close + verify size
+                    if (s_modelUp) {
+                        s_modelUp.flush();
+                        s_modelUpOk = (s_modelUp.size() == total && total > 0);
+                        s_modelUp.close();
+                    }
+                    Serial.printf("[MODEL] upload %s (%u bytes)\n",
+                                  s_modelUpOk ? "OK" : "FAILED", (unsigned)total);
+                }
+            });
 
         g_http.onNotFound([](AsyncWebServerRequest* req) {
             req->send(404, "text/plain", "Not found");
