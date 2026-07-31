@@ -67,7 +67,9 @@ export const state = {
 
   // always-on sensor activity — proves the rig is connected + responding even
   // when NOT recording (recording only gates the session stats / radar / eval).
-  liveActivity: { maxG: 0, peakHoldMs: 0, lastHitMs: 0, lastSampleMs: 0 },
+  // curG = instantaneous gravity-removed |a| (≈0 at rest, spikes on impact) so
+  // the readout is steady, not a peak-hold sawtooth of the 1 g gravity vector.
+  liveActivity: { curG: 0, lastHitMs: 0, lastSampleMs: 0 },
 
   // strikes
   strikes:          [],

@@ -89,8 +89,12 @@ export function ingestBatch({ slot, rssi, mac, samples, seq, recvMs }) {
 
   // always-on sensor activity — updated every packet regardless of recording,
   // so the user can see the rig is alive and reacting to G before pressing REC.
+  // Report gravity-removed dynamic G (≈0 at rest) INSTANTANEOUSLY — no peak-hold
+  // decay, so a stationary node reads a steady ~0 instead of a 1→0 sawtooth.
+  const dynG = Math.max(0, maxG - 1);
+  live.curG = dynG;                       // per-slot live value for the mixer
   const la = state.liveActivity;
-  if (maxG > la.maxG) { la.maxG = maxG; la.peakHoldMs = nowPerf; }
+  la.curG = dynG;                         // global live value for the topbar
   la.lastSampleMs = Date.now();
 
   // Track active time (only count packets while session active)

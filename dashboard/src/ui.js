@@ -81,17 +81,15 @@ function renderTopbar() {
   else if (t.mode === 'rest') { pill.className = 'pill pill-rest'; pillTxt.textContent = 'พัก'; }
   else { pill.className = 'pill pill-off'; pillTxt.textContent = 'พร้อม'; }
 
-  // always-on live sensor readout (device responsiveness, independent of recording)
+  // always-on live sensor readout (device responsiveness, independent of recording).
+  // Shows instantaneous gravity-removed G: steady ~0.0 at rest, spikes on impact —
+  // no peak-hold decay, so it never sawtooths 1→0 when the node is just sitting still.
   const ls = $('liveSensor'), lg = $('liveG');
   if (ls && lg) {
     const la = state.liveActivity;
-    const now = performance.now();
-    const decay = Math.max(0, 1 - (now - la.peakHoldMs) / 900);   // fade the peak hold
-    const g = la.maxG * decay;
-    if (decay <= 0) la.maxG = 0;
-    lg.textContent = g.toFixed(1);
-    const fresh   = (Date.now() - la.lastSampleMs) < 2500;         // data arriving = responsive
-    const hitPulse= (Date.now() - la.lastHitMs) < 350;
+    const fresh    = (Date.now() - la.lastSampleMs) < 2500;        // data arriving = responsive
+    const hitPulse = (Date.now() - la.lastHitMs) < 350;
+    lg.textContent = fresh ? la.curG.toFixed(1) : '0.0';
     ls.classList.toggle('is-live', fresh);
     ls.classList.toggle('is-hit', hitPulse);
   }
@@ -207,7 +205,9 @@ function renderMixer() {
     const peakPct = Math.min(100, (peakDisp / 16) * 100);
     fill.style.width = `${rmsPct}%`;
     peak.style.left  = `${peakPct}%`;
-    val.textContent  = peakDisp.toFixed(1) + 'g';
+    // number shows the INSTANTANEOUS gravity-removed G (steady ~0 at rest) instead
+    // of the decaying peak-hold, which sawtoothed 1→0 while the node sat still.
+    val.textContent  = (live.curG ?? 0).toFixed(1) + 'g';
     drawSpark(cnv, live.waveform, live.waveIdx);
   }
 }
