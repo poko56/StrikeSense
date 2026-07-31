@@ -443,14 +443,16 @@ function renderNodes() {
   const sig = state.nodes.map(n =>
     [n.mac, n.slot, n.batteryPct, Math.round((n.rssi || 0) / 3), n.packetsRx, n.seqGaps,
      (n.ageMs || 0) > 3000 ? 1 : 0,
+     (n.ageMs || 0) > 10000 ? 1 : 0,
      state.calibration.offsets.has(n.slot) ? 1 : 0,
      state.calibration.activeSlots.has(n.slot) ? 1 : 0].join(',')).join('|');
   if (sig === _lastNodesSig) return;
   _lastNodesSig = sig;
 
   list.innerHTML = state.nodes.map(n => {
-    const isStale = (n.ageMs || 0) > 3000;
-    const cls    = `node-card ${isStale ? 'stale' : 'live'}`;
+    const isStale   = (n.ageMs || 0) > 3000;
+    const isOffline = (n.ageMs || 0) > 10000;   // signal lost — kept, waiting to reconnect
+    const cls    = `node-card ${isOffline ? 'offline' : isStale ? 'stale' : 'live'}`;
     const bcls   = n.batteryPct >= 50 ? '' : n.batteryPct >= 20 ? 'low' : 'crit';
     const rssiBars = renderRssiBars(n.rssi);
 
@@ -476,8 +478,9 @@ function renderNodes() {
       <div class="${cls}" data-mac="${n.mac}">
         <div class="nc-head">
           <span class="nc-mac">${n.mac}</span>
-          <span class="nc-quality ${qCls}" title="Link quality">${quality}%</span>
-          <span class="nc-age">${isStale ? `${Math.round((n.ageMs||0)/1000)}s ago` : 'live'}</span>
+          <span class="nc-quality ${qCls}" title="คุณภาพสัญญาณ">${quality}%</span>
+          <span class="nc-age">${isOffline ? `⚠ ออฟไลน์ ${Math.round((n.ageMs||0)/1000)}s · รอเชื่อมต่อ`
+                                : isStale ? `${Math.round((n.ageMs||0)/1000)}s` : 'สด'}</span>
         </div>
         <div class="nc-row">
           <span class="meta-k">SLOT</span>
@@ -504,7 +507,8 @@ function renderNodes() {
         <div class="nc-actions">
           <button class="ico-btn" data-act="cal"     data-slot="${n.slot}" data-mac="${n.mac}" ${n.slot === 0 || isCalibrating ? 'disabled' : ''}>${isCalibrating ? 'CALIBRATING…' : (cal ? 'RE-CAL' : 'CALIBRATE')}</button>
           ${cal ? `<button class="ico-btn" data-act="cal-clear" data-slot="${n.slot}">CLEAR</button>` : ''}
-          <button class="ico-btn" data-act="hist" data-mac="${n.mac}">HISTORY</button>
+          <button class="ico-btn" data-act="hist" data-mac="${n.mac}">ประวัติ</button>
+          ${isOffline ? `<button class="ico-btn danger" data-act="forget" data-mac="${n.mac}">ลืมอุปกรณ์</button>` : ''}
         </div>
       </div>`;
   }).join('');
@@ -527,9 +531,16 @@ function renderNodes() {
       const slot = Number(e.target.dataset.slot);
       if (act === 'cal') openCalibrationModal(slot, mac);
       else if (act === 'cal-clear') {
-        if (confirm(`Clear calibration for slot ${SLOT_NAMES[slot]}?`)) clearCalibration(slot);
+        if (confirm(`ล้างค่าคาลิเบรตของ ${SLOT_NAMES[slot]}?`)) clearCalibration(slot);
       }
       else if (act === 'hist') openNodeHistoryModal(mac);
+      else if (act === 'forget') {
+        if (confirm(`ลืมอุปกรณ์ ${mac.slice(-5)}? (จะหายจากรายการจนกว่าจะเปิดใหม่)`)) {
+          api.nodeForget(mac)
+            .then(() => { toast(`ลืมอุปกรณ์ ${mac.slice(-5)} แล้ว`, 'ok'); refreshNodes(); })
+            .catch(err => toast(`ลืมไม่สำเร็จ: ${err.message}`, 'warn'));
+        }
+      }
     });
   });
 
@@ -1227,6 +1238,11 @@ let _refreshLib = () => {};
 export function bindRefreshLibrary(fn) { _refreshLib = fn; }
 export function refreshLibrary() { _refreshLib(); }
 
+// ───── NODES RESCAN HOOK ─────
+let _rescanNodes = () => {};
+export function bindRescanNodes(fn) { _rescanNodes = fn; }
+export function refreshNodes() { _rescanNodes(); }
+
 // ───── MODALS ─────
 function openStrikeDetail(id) {
   const s = state.strikes.find(x => x.id === id);
@@ -1396,6 +1412,10 @@ export function initUi() {
   $('btnEditGoals')?.addEventListener('click', openGoalsModal);
   $('btnHelp')?.addEventListener('click', openShortcutsModal);
   $('btnCalAll')?.addEventListener('click', openCalibrateAllModal);
+  $('btnRescanNodes')?.addEventListener('click', () => {
+    refreshNodes();
+    toast('กำลังค้นหาโหนดใหม่…', 'ok');
+  });
   $('buildStamp').textContent = new Date().toISOString().slice(0,10).replace(/-/g,'');
 }
 

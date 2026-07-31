@@ -1496,6 +1496,56 @@ body.is-fs .dial-clock { font-size: 56px; }
 }
 .ai-chip b { color: var(--paper-2); font-weight: 700; }
 
+/* ════════ SENSOR TAB EXTRAS (rescan / offline / forget / setup) ════════ */
+.sensors-head-btns { display: flex; gap: 6px; }
+.setup-relaunch {
+  width: 100%; margin: 8px 0 4px; padding: 10px;
+  border: 1px dashed var(--rule-2); border-radius: var(--radius);
+  background: var(--ink-2); color: var(--paper-2);
+  font: 600 11px/1.3 var(--f-body); cursor: pointer;
+}
+.setup-relaunch:hover { border-color: var(--teal-on); color: var(--paper); }
+.node-card.offline { opacity: .7; border-left: 3px solid var(--amber); }
+.node-card.offline .nc-age { color: var(--amber); }
+.ico-btn.danger { color: var(--blood-bright); border-color: rgba(214,38,49,.4); }
+.ico-btn.danger:hover { background: var(--blood-deep); color: var(--paper); }
+
+/* ════════ FIRST-RUN SETUP WIZARD ════════ */
+.setup-overlay {
+  position: fixed; inset: 0; z-index: 9000;
+  display: flex; align-items: center; justify-content: center; padding: 20px;
+  background: rgba(4,4,7,.82); backdrop-filter: blur(3px);
+}
+.setup-card {
+  width: 100%; max-width: 440px;
+  background: var(--ink-1); border: 1px solid var(--rule-2); border-radius: 6px;
+  padding: 26px 24px; text-align: center;
+  box-shadow: 0 24px 60px rgba(0,0,0,.5);
+}
+.setup-kicker { font: 700 10px/1 var(--f-display); letter-spacing: .22em; color: var(--gold); }
+.setup-title { font: 700 26px/1.15 var(--f-display); letter-spacing: .04em; color: var(--paper); margin: 10px 0; }
+.setup-limb  { color: var(--teal-on); }
+.setup-lead  { font: 500 13px/1.5 var(--f-body); color: var(--paper-2); margin: 0 0 16px; }
+.setup-steps { text-align: left; margin: 0 0 18px; padding-left: 20px; color: var(--paper-2); font: 500 12px/1.7 var(--f-body); }
+.setup-steps b { color: var(--paper); }
+.setup-shake-emoji { font-size: 52px; margin: 6px 0 2px; animation: setupWiggle 1.1s ease-in-out infinite; }
+@keyframes setupWiggle { 0%,100%{transform:rotate(-9deg)} 50%{transform:rotate(9deg)} }
+.setup-detect { margin: 6px 0 18px; }
+.setup-detect-bar { height: 10px; background: var(--ink-3); border-radius: 5px; overflow: hidden; }
+.setup-detect-bar i { display: block; height: 100%; width: 0; background: var(--teal-on); transition: width .15s ease; }
+.setup-detect-txt { margin-top: 8px; font: 500 12px/1.4 var(--f-mono); color: var(--paper-3); min-height: 16px; }
+.setup-actions { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; }
+.setup-btn {
+  padding: 11px 16px; border: 1px solid var(--rule-2); border-radius: var(--radius);
+  background: var(--ink-3); color: var(--paper); cursor: pointer;
+  font: 700 12px/1 var(--f-display); letter-spacing: .1em; min-height: 44px;
+}
+.setup-btn:hover { border-color: var(--paper-3); background: var(--ink-2); }
+.setup-btn.primary { background: var(--blood); border-color: var(--blood); color: #fff; }
+.setup-btn.primary:hover { background: var(--blood-bright); }
+.setup-btn.ghost { background: transparent; color: var(--paper-3); }
+@media (max-width: 460px) { .setup-card { padding: 20px 16px; } .setup-title { font-size: 22px; } }
+
 /* ════════ MOBILE (kept last so it wins over late base rules) ════════ */
 @media (max-width: 760px) {
   :root { --gap: 12px; }

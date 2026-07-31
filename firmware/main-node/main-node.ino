@@ -147,6 +147,8 @@ struct NodeMapping {
     uint32_t packetsRx;
     uint32_t lastSeq;
     uint32_t seqGaps;
+    float    peakG;        // most-recent frame peak |accel| (g) — powers shake-to-assign
+    uint32_t lastImuMs;    // when peakG was last updated
     bool     active;
 };
 
@@ -239,9 +241,20 @@ namespace Session {
             g_nodes[idx].batteryPct      = 0;
             g_nodes[idx].nodeUptimeMs    = 0;
             g_nodes[idx].firmwareVersion = 0;
+            g_nodes[idx].peakG           = 0;
+            g_nodes[idx].lastImuMs       = 0;
         }
         g_nodes[idx].lastRssi   = rssi;
         g_nodes[idx].lastSeenMs = millis();
+    }
+
+    // Live per-node activity (peak |accel|, g) — drives shake-to-assign in the
+    // first-run setup wizard so we can tell which physical node is being shaken.
+    void noteActivity(const uint8_t* mac, float peakG) {
+        int idx = findNode(mac);
+        if (idx < 0) return;
+        g_nodes[idx].peakG     = peakG;
+        g_nodes[idx].lastImuMs = millis();
     }
 
     void countImuPacket(const uint8_t* mac, uint32_t seq) {
@@ -293,14 +306,17 @@ namespace Session {
         return n;
     }
 
-    void cleanStaleNodes() {
-        const uint32_t now = millis();
-        for (size_t i = 0; i < MAX_NODES; ++i) {
-            if (g_nodes[i].active && (now - g_nodes[i].lastSeenMs > 15000)) { // 15s timeout (node sends every 1s)
-                g_nodes[i].active = false;
-                g_nodes[i].slot = SLOT_UNASSIGNED;
-            }
-        }
+    // A dropped node is NO LONGER deleted — it stays in the list (the dashboard
+    // shows it as offline via ageMs) and keeps its slot assignment, so when the
+    // signal returns it reconnects to the same limb with zero re-setup. Removal is
+    // now explicit only (forgetNode / the "ลืมอุปกรณ์" button).
+    void cleanStaleNodes() { /* intentionally keeps nodes across signal loss */ }
+
+    bool forgetNode(const uint8_t* mac) {
+        int idx = findNode(mac);
+        if (idx < 0) return false;
+        g_nodes[idx] = {};      // free the slot entirely
+        return true;
     }
 } // namespace Session
 
@@ -761,6 +777,9 @@ namespace WebServerApp {
                 o["packetsRx"]    = nodes[i].packetsRx;
                 o["lastSeq"]      = nodes[i].lastSeq;
                 o["seqGaps"]      = nodes[i].seqGaps;
+                // live shake activity (g) — only if fresh, else 0 so a stale node
+                // never looks "shaken" in the setup wizard
+                o["peakG"]        = (nowMs - nodes[i].lastImuMs < 1000) ? nodes[i].peakG : 0.0f;
             }
             String out; serializeJson(arr, out);
             req->send(200, "application/json", out);
@@ -783,6 +802,26 @@ namespace WebServerApp {
                 }
                 NodeSlot slot = (NodeSlot)(int)(doc["slot"] | 0);
                 bool ok = Session::assignSlot(mac, slot);
+                req->send(ok ? 200 : 404, "application/json",
+                          ok ? "{\"ok\":true}" : "{\"error\":\"unknown node\"}");
+            });
+
+        // ---- POST /api/nodes/forget (explicit removal — drops persist otherwise) ----
+        g_http.on("/api/nodes/forget", HTTP_POST,
+            [](AsyncWebServerRequest*) {},
+            nullptr,
+            [](AsyncWebServerRequest* req, uint8_t* data, size_t len, size_t, size_t) {
+                DynamicJsonDocument doc(512);
+                if (deserializeJson(doc, data, len)) {
+                    req->send(400, "application/json", "{\"error\":\"bad json\"}");
+                    return;
+                }
+                uint8_t mac[6];
+                if (!parseMac(doc["mac"] | "", mac)) {
+                    req->send(400, "application/json", "{\"error\":\"bad mac\"}");
+                    return;
+                }
+                bool ok = Session::forgetNode(mac);
                 req->send(ok ? 200 : 404, "application/json",
                           ok ? "{\"ok\":true}" : "{\"error\":\"unknown node\"}");
             });
@@ -1068,6 +1107,16 @@ void loop() {
     int drained = 0;
     while (drained < 32 && EspNowRx::nextFrame(frame, 0)) {
         Session::noteImuFrame(frame.sampleCount);
+        // per-node peak |accel| (g) for shake-to-assign
+        float pk = 0.0f;
+        for (uint8_t i = 0; i < frame.sampleCount; ++i) {
+            const float ax = frame.samples[i].ax / 2048.0f;
+            const float ay = frame.samples[i].ay / 2048.0f;
+            const float az = frame.samples[i].az / 2048.0f;
+            const float m  = sqrtf(ax * ax + ay * ay + az * az);
+            if (m > pk) pk = m;
+        }
+        Session::noteActivity(frame.mac, pk);
         if (Session::isActive()) SdLogger::logFrame(frame);
         WebServerApp::broadcastImuFrame(frame);
         drained++;

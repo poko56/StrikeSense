@@ -17,6 +17,7 @@ export const api = {
   status:        ()         => json('/api/status'),
   nodes:         ()         => json('/api/nodes'),
   assignSlot:    (mac,slot) => json('/api/nodes/assign', { method: 'POST', body: JSON.stringify({ mac, slot: Number(slot) }) }),
+  nodeForget:    (mac)      => json('/api/nodes/forget', { method: 'POST', body: JSON.stringify({ mac }) }),
   sessionStart:  (athlete)  => json('/api/session/start', { method: 'POST', body: JSON.stringify({ athlete }) }),
   sessionStop:   ()         => json('/api/session/stop',  { method: 'POST' }),
   sessions:      ()         => json('/api/sessions'),

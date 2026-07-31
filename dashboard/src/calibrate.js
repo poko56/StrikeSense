@@ -16,6 +16,15 @@ import { persist } from './persist.js';
 
 const PERSIST_KEY = 'calibration';
 const MIN_SAMPLES = 20;
+const MAX_MOTION_STD = 0.18;   // g — reject calibration if the node wasn't held still
+
+/** std-dev of accel magnitude across samples — high = the node was moving */
+function motionStd(samples) {
+  const mags = samples.map(s => Math.sqrt(s.ax*s.ax + s.ay*s.ay + s.az*s.az));
+  const mean = mags.reduce((a, b) => a + b, 0) / mags.length;
+  const varr = mags.reduce((a, b) => a + (b - mean) ** 2, 0) / mags.length;
+  return Math.sqrt(varr);
+}
 
 /** Restore offsets map from localStorage. Called once at boot. */
 export function loadCalibration() {
@@ -147,7 +156,11 @@ function finalizeAll(slots, macBySlot, resolve) {
   for (const slot of slots) {
     const samples = state.calibration.collectedBySlot.get(slot) || [];
     if (samples.length < MIN_SAMPLES) {
-      failed.push({ slot, reason: `${samples.length} samples` });
+      failed.push({ slot, reason: `ข้อมูลน้อยไป (${samples.length}) — เช็คว่าโหนดออนไลน์และถูกจับคู่` });
+      continue;
+    }
+    if (motionStd(samples) > MAX_MOTION_STD) {
+      failed.push({ slot, reason: 'ขยับระหว่างคาลิเบรต — วางนิ่งๆ แล้วลองใหม่' });
       continue;
     }
     const off = computeOffset(samples, macBySlot.get(slot));
@@ -176,9 +189,7 @@ export function startCalibration(slot, mac, durationMs, onProgress) {
     const r = results.get(slot);
     if (r) return { slot, samples: r.samples, offset: r.offset };
     const f = failed.find(x => x.slot === slot);
-    throw new Error(
-      `Not enough samples (${f ? f.reason : '0'}). Make sure the node is powered + assigned + transmitting.`,
-    );
+    throw new Error(f ? f.reason : 'คาลิเบรตไม่สำเร็จ — เช็คว่าโหนดออนไลน์และถูกจับคู่');
   });
   return { promise, abort: ctrl.abort };
 }

@@ -3,9 +3,10 @@
 
 import { state, subscribe, scheduleRender, resetSessionState, pushActivity } from './state.js';
 import {
-  initUi, renderAll, toast, bindRefreshLibrary, refreshLibrary,
+  initUi, renderAll, toast, bindRefreshLibrary, refreshLibrary, bindRescanNodes,
   bindSaveTuning, bindSaveModes, bindSaveGoals, openGoalsModal, openShortcutsModal,
 } from './ui.js';
+import { initSetup, openSetupWizard } from './setup.js';
 import { api as realApi } from './api.js';
 import { startWs } from './ws.js';
 import {
@@ -20,7 +21,7 @@ import { loadCalibration } from './calibrate.js';
 import { initLogger, renderLogger } from './logger.js';
 import { initAiModel, renderAiModel } from './aimodel.js';
 import { initScorecard, renderScorecard } from './score.js';
-import { maybeAutoStartTour, startTour } from './tour.js';
+import { startTour } from './tour.js';
 
 const demo = isDemo();
 const api  = demo ? demoApi : realApi;
@@ -67,9 +68,12 @@ document.getElementById('devModeToggle')?.addEventListener('change', e => {
   toast(e.target.checked ? '🛠 Developer mode ON · เปิดเครื่องมือเก็บข้อมูล' : 'Developer mode OFF', 'ok');
 });
 
-// ───── onboarding tour (first-run auto · re-openable) ─────
+// ───── onboarding tour (re-openable from SYSTEM tab) ─────
 document.getElementById('btnStartTour')?.addEventListener('click', startTour);
-maybeAutoStartTour();
+
+// ───── first-run setup wizard (shake-to-assign) — opens on every load per spec ─────
+initSetup(api, { onTour: startTour });
+setTimeout(() => openSetupWizard(), 700);
 
 if (demo) {
   document.getElementById('modeTxt').textContent = 'DEMO';
@@ -368,6 +372,7 @@ async function refreshLib() {
   } catch (e) {}
 }
 bindRefreshLibrary(refreshLib);
+bindRescanNodes(pollNodes);   // "ค้นหาใหม่" button → immediate node re-poll
 
 pollStatus(); pollNodes(); refreshLib();
 setInterval(pollStatus, 1500);

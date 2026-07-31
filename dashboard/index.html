@@ -475,8 +475,12 @@
       <section class="block tabpane on" data-pane="sensors">
         <div class="sensors-head">
           <div class="kicker">โหนดที่เชื่อมต่อ · NODES</div>
-          <button class="cal-all-btn" id="btnCalAll" title="คาลิเบรตทุกโหนดพร้อมกัน">⊕ คาลิเบรตทั้งหมด</button>
+          <div class="sensors-head-btns">
+            <button class="cal-all-btn" id="btnRescanNodes" title="ค้นหา/รีเฟรชโหนดทั้งหมดทันที">🔄 ค้นหาใหม่</button>
+            <button class="cal-all-btn" id="btnCalAll" title="คาลิเบรตทุกโหนดพร้อมกัน">⊕ คาลิเบรตทั้งหมด</button>
+          </div>
         </div>
+        <button class="setup-relaunch" id="btnOpenSetup" type="button">🧭 เปิดตัวช่วยตั้งค่าเซนเซอร์ (เขย่าเพื่อจับคู่)</button>
         <div class="node-list" id="nodeList">
           <div class="empty-card">— ไม่พบโหนด —<br><span class="dim">เปิด Strike Node ให้อยู่ในระยะ 2 เมตรจากโหนดหลัก</span></div>
         </div>
