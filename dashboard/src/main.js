@@ -10,8 +10,8 @@ import { initSetup, openSetupWizard } from './setup.js';
 import { api as realApi } from './api.js';
 import { startWs } from './ws.js';
 import {
-  applyPreset, startTimer, resetTimer, skipPhase, tickTimer, onPhaseChange,
-  setStopwatch,
+  applyPreset, resetTimer, skipPhase, tickTimer, onPhaseChange,
+  setStopwatch, startOrResumeTimer, pauseTimer,
 } from './timer.js';
 import { addMarker } from './analyzer.js';
 import { isDemo, startDemo, demoApi } from './demo.js';
@@ -22,6 +22,7 @@ import { initLogger, renderLogger } from './logger.js';
 import { initAiModel, renderAiModel } from './aimodel.js';
 import { initScorecard, renderScorecard } from './score.js';
 import { startTour } from './tour.js';
+import { initDiagLog, setDiagLogEnabled, logLocal } from './diaglog.js';
 
 const demo = isDemo();
 const api  = demo ? demoApi : realApi;
@@ -44,7 +45,8 @@ if (savedModes)  { state.ui.bodyHeatmap = !!savedModes.bodyHeatmap; state.timer.
 loadCalibration();
 
 // ───── bootstrap ─────
-initUi();
+initUi(api);           // hand the UI the demo stub when running with ?demo=1
+initDiagLog(api);      // dev-mode diagnostic console (rig log + browser events)
 initLogger();          // AI training data logger panel
 initAiModel();         // AI gesture model — upload + live inference
 initScorecard();       // performance radar
@@ -60,6 +62,8 @@ function applyDevMode(on) {
   const cb = document.getElementById('devModeToggle');
   if (cb) cb.checked = !!on;
   persist.set(K.devMode, !!on);
+  // The diagnostic console only polls the rig while dev mode is on.
+  setDiagLogEnabled(!!on);
 }
 const urlDev = new URLSearchParams(location.search).has('dev');
 applyDevMode(urlDev || persist.get(K.devMode, false));
@@ -71,9 +75,28 @@ document.getElementById('devModeToggle')?.addEventListener('change', e => {
 // ───── onboarding tour (re-openable from SYSTEM tab) ─────
 document.getElementById('btnStartTour')?.addEventListener('click', startTour);
 
-// ───── first-run setup wizard (shake-to-assign) — opens on every load per spec ─────
-initSetup(api, { onTour: startTour });
-setTimeout(() => openSetupWizard(), 700);
+// ───── first-run setup wizard (shake-to-assign) ─────
+// Provisioning belongs to the RIG, not the browser. The Main Node reports
+// setupDone; a fresh or factory-reset device says false and every phone that
+// connects gets walked through pairing. Once anyone finishes (or deliberately
+// skips) we tell the rig, and it stops asking. The local flag is only a fallback
+// for when the rig can't be reached.
+function markSetupDone() {
+  persist.set(K.setupDone, true);
+  api.setupDone?.(true).catch(() => {});
+}
+initSetup(api, { onTour: startTour, onFinish: markSetupDone });
+
+async function maybeOpenSetupWizard() {
+  let rigIsFresh = null;
+  try {
+    const s = await api.status();
+    if (s && typeof s.setupDone === 'boolean') rigIsFresh = !s.setupDone;
+  } catch { /* unreachable — fall back to the local flag below */ }
+  const localSeen = persist.get(K.setupDone, false);
+  if (rigIsFresh === true || (rigIsFresh === null && !localSeen)) openSetupWizard();
+}
+setTimeout(maybeOpenSetupWizard, 700);
 
 if (demo) {
   document.getElementById('modeTxt').textContent = 'DEMO';
@@ -130,6 +153,7 @@ async function toggleSession() {
 }
 async function startSession() {
   const athlete = document.getElementById('athleteName').value.trim() || 'anonymous';
+  _sessionCmdAtMs = Date.now();
   try {
     const res = await api.sessionStart(athlete);
     state.session.active      = true;
@@ -137,21 +161,44 @@ async function startSession() {
     state.session.startedAtMs = Date.now();
     state.session.athlete     = athlete;
     resetSessionState();
+    // REC also runs the clock. Without this the round timer only ever started from
+    // the dial, so pressing บันทึก armed the recording and the dial stayed at 00:00.
+    startOrResumeTimer();
     pushActivity('rec', `▶ เริ่มบันทึก · ${res.sessionId}`);
     toast(`เริ่มบันทึกแล้ว · ${res.sessionId}`, 'ok');
     if (!res.sdLogging) toast('เตือน: บันทึกลง SD card ไม่ได้', 'warn');
     scheduleRender();
-  } catch (e) { toast(`เริ่มไม่สำเร็จ: ${e.message}`, 'warn'); }
+  } catch (e) {
+    // 409 = the rig is already recording (another phone started it, or this tab
+    // reloaded mid-session). Adopt that session instead of dead-ending.
+    if (e.status === 409 && e.body?.sessionId) {
+      state.session.active      = true;
+      state.session.id          = e.body.sessionId;
+      state.session.startedAtMs = Date.now() - (state.hostStatus?.session?.durationMs || 0);
+      state.session.athlete     = athlete;
+      startOrResumeTimer();
+      toast(`เข้าร่วมการบันทึกที่กำลังทำงาน · ${e.body.sessionId}`, 'ok');
+      scheduleRender();
+      return;
+    }
+    toast(`เริ่มไม่สำเร็จ: ${e.message}`, 'warn');
+  }
 }
 async function stopSession() {
+  _sessionCmdAtMs = Date.now();
   try {
     await api.sessionStop();
-    state.session.active = false;
-    pushActivity('rec', `■ หยุดบันทึก`);
-    toast('หยุดบันทึกแล้ว', 'ok');
-    refreshLibrary();
-    scheduleRender();
-  } catch (e) { toast(`หยุดไม่สำเร็จ: ${e.message}`, 'warn'); }
+  } catch (e) {
+    // 409 "not active" means the rig already stopped — fall through and sync the UI
+    // rather than leaving the button stuck on หยุด.
+    if (e.status !== 409) { toast(`หยุดไม่สำเร็จ: ${e.message}`, 'warn'); return; }
+  }
+  state.session.active = false;
+  pauseTimer();                 // freeze the round where it stopped, keep the count
+  pushActivity('rec', `■ หยุดบันทึก`);
+  toast('หยุดบันทึกแล้ว', 'ok');
+  refreshLibrary();
+  scheduleRender();
 }
 
 // ───── Round preset ─────
@@ -182,9 +229,9 @@ document.getElementById('roundPreset').addEventListener('change', e => {
 document.getElementById('btnRoundReset').addEventListener('click', resetTimer);
 document.getElementById('btnRoundSkip').addEventListener('click', skipPhase);
 document.getElementById('autoRec').addEventListener('change', e => { state.timer.autoRec = e.target.checked; });
-document.getElementById('roundDial').addEventListener('click', () => {
-  if (state.timer.mode === 'idle' || state.timer.mode === 'done') startTimer();
-});
+// Tapping the dial starts the clock — and now also resumes one that REC paused,
+// which was otherwise only recoverable with รีเซ็ต.
+document.getElementById('roundDial').addEventListener('click', startOrResumeTimer);
 
 // ───── Marker ─────
 document.getElementById('btnMarker').addEventListener('click', () => promptMarker());
@@ -270,16 +317,29 @@ window.addEventListener('keydown', (e) => {
 });
 
 // ───── polling ─────
+// A /api/status reply that was already in flight when the user hit REC describes
+// the world before the press. Ignore the session part of it briefly so the button
+// and the clock don't flicker back.
+let _sessionCmdAtMs = 0;
+const SESSION_SYNC_GRACE_MS = 2500;
+
 async function pollStatus() {
   try {
     const s = await api.status();
     state.hostStatus = s;
-    if (s?.session) {
+    if (s?.session && Date.now() - _sessionCmdAtMs > SESSION_SYNC_GRACE_MS) {
       const wasActive = state.session.active;
       state.session.active = !!s.session.active;
       state.session.id     = s.session.id || state.session.id;
       if (s.session.active) state.session.startedAtMs = Date.now() - (s.session.durationMs || 0);
-      if (wasActive !== state.session.active) scheduleRender();
+      if (wasActive !== state.session.active) {
+        // The rig changed state without us — another phone pressed REC, or a round
+        // ended. Every connected dashboard follows, clock included, so two coaches
+        // watching the same rig see the same round.
+        if (state.session.active) startOrResumeTimer();
+        else                      pauseTimer();
+        scheduleRender();
+      }
     }
     scheduleRender();
   } catch (e) {}
@@ -374,10 +434,29 @@ async function refreshLib() {
 bindRefreshLibrary(refreshLib);
 bindRescanNodes(pollNodes);   // "ค้นหาใหม่" button → immediate node re-poll
 
+// ───── polling schedule ─────
+// A backgrounded phone used to keep hammering the Main Node with ~1.5 requests a
+// second forever; each one costs the ESP32 a JSON build and a TCP round trip that
+// competes with the live IMU stream. Nothing here needs to run while the tab is
+// hidden, and the library only matters while its tab is on screen.
+function paced(fn, { whenHidden = false, onlyTab = null } = {}) {
+  return () => {
+    if (!whenHidden && document.hidden) return;
+    if (onlyTab && state.ui.activeTab !== onlyTab && state.sessions.length) return;
+    fn();
+  };
+}
+
 pollStatus(); pollNodes(); refreshLib();
-setInterval(pollStatus, 1500);
-setInterval(pollNodes,  2000);
-setInterval(refreshLib, 8000);
+setInterval(paced(pollStatus), 1500);
+setInterval(paced(pollNodes),  2000);
+setInterval(paced(refreshLib, { onlyTab: 'library' }), 10000);
+
+// Coming back to the app: refresh at once instead of waiting out the interval.
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState !== 'visible') return;
+  pollStatus(); pollNodes();
+});
 
 // ───── render loop ─────
 function loop() {
@@ -387,4 +466,10 @@ function loop() {
 }
 requestAnimationFrame(loop);
 
-if (!demo) window.__state = state;
+// requestAnimationFrame stops dead when the phone locks or the coach switches apps,
+// which froze the round timer mid-session. Keep ticking on an interval while hidden
+// so phases still advance and the clock is right the moment they look back at it.
+// (Browsers clamp background intervals to ~1 Hz — plenty for a round timer.)
+setInterval(() => { if (document.hidden) tickTimer(); }, 500);
+
+window.__state = state;   // debug handle (also in demo, so the UI can be inspected)

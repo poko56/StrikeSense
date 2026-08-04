@@ -22,6 +22,7 @@ const POLL_MS   = 220;
 
 let api = null;
 let onTour = () => {};
+let onFinish = () => {};
 let overlay = null;
 let pollTimer = null;
 let stepIdx = 0;                 // -1 welcome, 0..3 limbs, 99 done
@@ -30,7 +31,8 @@ let candidateMac = null, candidateHits = 0;
 
 export function initSetup(activeApi, opts = {}) {
   api = activeApi;
-  onTour = opts.onTour || (() => {});
+  onTour   = opts.onTour   || (() => {});
+  onFinish = opts.onFinish || (() => {});
   document.getElementById('btnOpenSetup')?.addEventListener('click', () => openSetupWizard());
 }
 
@@ -48,6 +50,9 @@ function closeWizard() {
   stopPoll();
   overlay?.remove();
   overlay = null;
+  // Reaching the end OR skipping both count as "this rig has been set up" — either
+  // way the user has made a decision and shouldn't be re-prompted on every load.
+  try { onFinish(); } catch (e) { console.error(e); }
 }
 
 function stopPoll() { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } candidateMac = null; candidateHits = 0; }
@@ -75,6 +80,9 @@ function renderWelcome() {
       <li>ระบบจะถามทีละอวัยวะ — <b>เขย่าเซนเซอร์</b>ที่จะใส่ตรงนั้น</li>
       <li>เสร็จแล้วคาลิเบรตเพื่อความแม่นยำ</li>
     </ol>
+    <div class="setup-detect">
+      <div class="setup-detect-txt" id="setupOnlineTxt">กำลังค้นหาเซนเซอร์…</div>
+    </div>
     <div class="setup-actions">
       <button class="setup-btn ghost" data-act="skip-all">ข้ามการตั้งค่า</button>
       <button class="setup-btn ghost" data-act="tour">ดูวิธีใช้งาน</button>
@@ -86,6 +94,25 @@ function renderWelcome() {
     'tour': () => { closeWizard(); onTour(); },
     'start': () => { stepIdx = 0; render(); },
   });
+  startPollForOnlineCount();
+}
+
+// Live sensor headcount on the welcome screen. With a multi-node rig the usual
+// failure is starting the wizard with one sensor still switched off and only
+// finding out three steps later.
+function startPollForOnlineCount() {
+  const txt = () => overlay?.querySelector('#setupOnlineTxt');
+  const tick = async () => {
+    let nodes;
+    try { nodes = await api.nodes(); } catch (e) { return; }
+    if (!overlay || !txt()) return;
+    const online = (nodes || []).filter(n => (n.ageMs ?? 9999) < 3000);
+    txt().textContent = online.length
+      ? `🟢 พบเซนเซอร์ออนไลน์ ${online.length} ตัว · ${online.map(n => n.mac.slice(-5)).join(' · ')}`
+      : '⚠ ยังไม่พบเซนเซอร์ออนไลน์ — เปิดเครื่องแล้วรอสักครู่';
+  };
+  tick();
+  pollTimer = setInterval(tick, 800);
 }
 
 function renderLimb() {

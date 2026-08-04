@@ -36,14 +36,17 @@ export function resetTimer() {
     mode: 'idle', currentRound: 0, phaseStartMs: 0,
     remainingMs: state.timer.workSec * 1000,
     stopwatchStartMs: 0,
+    paused: false,
   });
   if (prev !== 'idle') emit(prev, 'idle', 0);
   scheduleRender();
 }
 
 export function startTimer() {
+  state.timer.paused = false;
   if (state.timer.stopwatch) {
     state.timer.mode = 'work';
+    state.timer.remainingMs = 0;
     state.timer.stopwatchStartMs = performance.now();
     state.timer.phaseStartMs = state.timer.stopwatchStartMs;
     emit('idle', 'work', 1);
@@ -58,6 +61,47 @@ export function startTimer() {
   state.timer.remainingMs  = state.timer.workSec * 1000;
   emit(prev, 'work', 1);
   scheduleRender();
+}
+
+export function isRunning() {
+  const t = state.timer;
+  return !t.paused && (t.mode === 'work' || t.mode === 'rest');
+}
+
+/** Freeze the clock where it is, keeping the round + phase. */
+export function pauseTimer() {
+  const t = state.timer;
+  if (t.paused || (t.mode !== 'work' && t.mode !== 'rest')) return;
+  t.paused = true;          // remainingMs is already current from the last tick
+  scheduleRender();
+}
+
+/** Continue from where pauseTimer() left off. */
+export function resumeTimer() {
+  const t = state.timer;
+  if (!t.paused) return;
+  t.paused = false;
+  if (t.stopwatch) {
+    t.stopwatchStartMs = performance.now() - t.remainingMs;
+    t.phaseStartMs     = t.stopwatchStartMs;
+  } else {
+    const total = (t.mode === 'work' ? t.workSec : t.restSec) * 1000;
+    t.phaseStartMs = performance.now() - (total - t.remainingMs);
+  }
+  scheduleRender();
+}
+
+/**
+ * What the REC button needs: make the clock run, whatever state it is in.
+ * Resumes a paused timer, starts an idle/finished one, and leaves an already
+ * running one alone. Pressing บันทึก used to arm the recording without ever
+ * touching the timer, so the dial just sat at 00:00.
+ */
+export function startOrResumeTimer() {
+  const t = state.timer;
+  if (t.paused)   { resumeTimer(); return; }
+  if (t.mode === 'work' || t.mode === 'rest') return;   // already counting
+  startTimer();
 }
 
 export function skipPhase() {
@@ -90,6 +134,7 @@ function advancePhase() {
 
 export function tickTimer() {
   const t = state.timer;
+  if (t.paused) return;
   if (t.stopwatch && t.mode === 'work') {
     t.remainingMs = performance.now() - t.stopwatchStartMs;
     return;

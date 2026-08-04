@@ -112,4 +112,17 @@ export const demoApi = {
   sessions:      async () => state.sessions,
   sessionDelete: async (id) => { state.sessions = state.sessions.filter(s => s.id !== id); return { ok: true }; },
   sessionDownloadUrl: (id) => '#demo-download-' + id,
+  nodeForget:    async (mac) => { state.nodes = state.nodes.filter(n => n.mac !== mac); return { ok: true }; },
+  logs:          async () => ({ lastSeq: 0, uptimeMs: 0, entries: [] }),
+  nodeIdentify:  async () => ({ ok: true }),
+  nodeLinkReset: async (mac) => {
+    const n = state.nodes.find(x => x.mac === mac);
+    if (n) { n.packetsRx = 0; n.seqGaps = 0; }
+    return { ok: true, known: !!n, peer: true };
+  },
+  nodeRestart:   async () => ({ ok: true }),
+  radioRestart:  async () => ({ ok: true, rx: true, tx: true }),
+  systemReboot:  async () => ({ ok: true, rebootInMs: 0 }),
+  setupDone:     async () => ({ ok: true }),
+  factoryReset:  async () => ({ ok: true, sessionsRemoved: 0, modelRemoved: false, rebootInMs: 0 }),
 };

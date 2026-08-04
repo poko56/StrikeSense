@@ -607,6 +607,34 @@
             <td>StrikeSense v0.2</td>
           </tr>
         </table>
+
+        <!-- dev mode only: full diagnostic console (rig + browser events) -->
+        <div class="diag-block">
+          <div class="kicker mt-4">บันทึกการทำงานละเอียด · DIAGNOSTICS</div>
+          <div class="dim small">เหตุการณ์ทั้งหมดจากโหนดหลักและเบราว์เซอร์ — แบต · การเชื่อมต่อ · WebSocket · SD</div>
+          <div class="diag-bar">
+            <input class="search" id="diagFilter" type="search" placeholder="กรอง เช่น WS, BATT, HTTP…">
+            <button class="chip ghost" id="diagPause" type="button">⏸ หยุด</button>
+            <button class="chip ghost" id="diagCopy" type="button">⧉ คัดลอก</button>
+            <button class="chip ghost" id="diagClear" type="button">ล้าง</button>
+          </div>
+          <div class="diag-stat mono dim small" id="diagStat">—</div>
+          <div class="diag-list mono" id="diagList">
+            <div class="dim small">— ยังไม่มี log —</div>
+          </div>
+        </div>
+
+        <div class="kicker mt-4">กู้คืนการเชื่อมต่อ · RECOVERY</div>
+        <div class="dim small">ใช้เมื่อโหนดขึ้นในรายการแต่ไม่มีข้อมูลเข้า หรือหน้าเว็บต่อไม่ติด</div>
+        <div class="recovery-row">
+          <button class="recovery-btn" id="btnReconnectWs" type="button">⇄ ต่อสตรีมใหม่</button>
+          <button class="recovery-btn" id="btnRadioRestart" type="button">📡 รีสตาร์ทวิทยุ</button>
+          <button class="recovery-btn" id="btnMainReboot" type="button">↻ รีบูตโหนดหลัก</button>
+        </div>
+
+        <div class="kicker mt-4">รีเซ็ตอุปกรณ์ · FACTORY RESET</div>
+        <div class="dim small">ล้างการจับคู่เซนเซอร์และค่าทั้งหมด แล้วเริ่มตั้งค่าใหม่เหมือนเพิ่งแกะกล่อง</div>
+        <button class="factory-reset-btn" id="btnFactoryReset" type="button">↺ รีเซ็ตเป็นค่าจากโรงงาน</button>
       </section>
 
     </aside>

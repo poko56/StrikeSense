@@ -60,6 +60,7 @@ export const state = {
     autoRec:      true,
     stopwatch:    false,           // alt mode: free count up
     stopwatchStartMs: 0,
+    paused:       false,           // REC stopped mid-round — clock frozen, round kept
   },
 
   // live IMU per slot

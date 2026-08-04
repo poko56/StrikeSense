@@ -6,11 +6,33 @@ import {
   computeSpm, computeAvgG, computeFatigue, computeCv, computeWorkKJ, computeTimeOnTarget,
   addMarker, deleteMarker,
 } from './analyzer.js';
-import { api } from './api.js';
+import { api as realApi } from './api.js';
+import { persist } from './persist.js';
+import { reconnectStream } from './ws.js';
 import { openModal, closeModal } from './modal.js';
 import { startCalibration, startCalibrationFor, abortCalibration, clearCalibration, clearAllCalibration, isCalibratingAny } from './calibrate.js';
+import { loadSession, Playback } from './replay.js';
+
+// The active backend: the real REST client, or the demo stub when the dashboard
+// runs with ?demo=1. main.js supplies it via initUi(). ui.js used to always talk
+// to the real Main Node, so every button defined in here failed in demo mode.
+let api = realApi;
 
 const $ = id => document.getElementById(id);
+
+// ───── render gating ─────
+// renderAll() runs off requestAnimationFrame, i.e. ~60×/s. The dial and the live
+// meters need that; rebuilding the strike table, the timeline, the session library
+// and the system panel 60 times a second does not — it was the single largest CPU
+// cost on a phone, and it fought the WebSocket for the same main thread.
+// Each heavy section now declares a cheap signature and only touches the DOM when
+// that signature actually changes.
+const _renderSig = Object.create(null);
+function changed(key, sig) {
+  if (_renderSig[key] === sig) return false;
+  _renderSig[key] = sig;
+  return true;
+}
 
 // ───── formatters ─────
 function fmtClock(ms) {
@@ -125,17 +147,19 @@ const PHASE_TH = { idle: 'พร้อม', work: 'ชก', rest: 'พัก', d
 
 // ───── STATS ─────
 function renderStats() {
+  const dur0 = state.session.active
+    ? Date.now() - state.session.startedAtMs
+    : (state.hostStatus?.session?.durationMs ?? 0);
+  // Everything here changes on a strike or once a second — no need for 60 Hz.
+  if (!changed('stats', `${state.strikes.length}|${state.peakG.toFixed(1)}|${Math.floor(dur0 / 1000)}`)) return;
+
   $('stPeak').querySelector('.stat-num').textContent = state.peakG.toFixed(1);
   $('stAvg').querySelector('.stat-num').textContent  = computeAvgG().toFixed(1);
   $('stCount').textContent = state.strikes.length;
   $('stSpm').textContent   = computeSpm().toFixed(0);
   $('stToT').firstChild.textContent  = computeTimeOnTarget();
   $('stWork').firstChild.textContent = computeWorkKJ().toFixed(2);
-
-  const dur = state.session.active
-    ? Date.now() - state.session.startedAtMs
-    : (state.hostStatus?.session?.durationMs ?? 0);
-  $('stDuration').textContent = fmtClock(dur);
+  $('stDuration').textContent = fmtClock(dur0);
 }
 
 // ───── BODY DIAGRAM (live or heatmap) ─────
@@ -165,9 +189,15 @@ function renderBody() {
 }
 
 // ───── MIXER (VU + sparkline) ─────
+let _mixerDrawnAt = 0;
 function renderMixer() {
   const mix = $('mixer');
   if (!mix) return;
+  // Four 300-point canvas paths per frame is real work on a phone. 25 fps still
+  // reads as continuous motion for a VU meter.
+  const nowMs = performance.now();
+  if (nowMs - _mixerDrawnAt < 40) return;
+  _mixerDrawnAt = nowMs;
   const slots = [1, 2, 3, 4];
   if (mix.children.length !== slots.length) {
     mix.innerHTML = slots.map(s => `
@@ -246,6 +276,8 @@ function drawSpark(cnv, buf, head) {
 function renderDistribution() {
   const list = $('distList');
   const total = state.strikes.length;
+  // Only a recorded strike moves any of these numbers.
+  if (!changed('dist', `${total}|${state.leftCount}|${state.rightCount}|${state.tuning.thresholdG}`)) return;
   const entries = Object.entries(state.distribution).filter(([,v]) => v > 0);
   if (!entries.length) {
     list.innerHTML = '<div class="empty-card" style="padding:10px">— no strikes —</div>';
@@ -286,6 +318,7 @@ const FATIGUE_TH = { 'stable': 'คงที่', 'fatiguing': 'เริ่ม�
 // ───── GOALS ─────
 function renderGoals() {
   const g = state.goals;
+  if (!changed('goals', `${state.strikes.length}|${state.peakG.toFixed(1)}|${g.targetStrikes}|${g.targetPeakG}|${g.completedAt}|${state.session.active}`)) return;
   const sPct = Math.min(100, (state.strikes.length / Math.max(1, g.targetStrikes)) * 100);
   const pPct = Math.min(100, (state.peakG          / Math.max(1, g.targetPeakG))   * 100);
   const sFill = $('goalStrFill'); sFill.style.width = `${sPct}%`;  sFill.classList.toggle('full', sPct >= 100);
@@ -308,6 +341,7 @@ function renderGoals() {
 // ───── PER-ROUND TABLE ─────
 function renderPerRound() {
   const body = $('roundTbody');
+  if (!changed('perRound', `${state.perRound.length}|${state.timer.mode}|${state.timer.currentRound}|${state.strikes.length}`)) return;
   if (!state.perRound.length) {
     body.innerHTML = '<tr class="empty"><td colspan="5">— round summary will appear here —</td></tr>';
     return;
@@ -335,6 +369,8 @@ function renderPerRound() {
 // ───── ACTIVITY FEED ─────
 function renderActivity() {
   const list = $('activityList');
+  // Content changes on new events; the relative timestamps age, so refresh every 5 s.
+  if (!changed('activity', `${state.ui.activity.length}|${state.ui.activity[0]?.t || 0}|${Math.floor(Date.now() / 5000)}`)) return;
   if (!state.ui.activity.length) {
     list.innerHTML = '<li class="dim">— no activity yet —</li>';
     return;
@@ -347,6 +383,8 @@ function renderActivity() {
 // ───── MARKERS ─────
 function renderMarkers() {
   const list = $('markerList');
+  // Rebuilding this also re-binds delete handlers — doing that 60×/s leaked work.
+  if (!changed('markers', `${state.markers.length}|${state.markers[state.markers.length-1]?.id || 0}`)) return;
   if (!state.markers.length) {
     list.innerHTML = '<li class="dim">— no markers yet · press M during session —</li>';
     return;
@@ -374,6 +412,8 @@ function renderTimeline() {
     ? Date.now() - state.session.startedAtMs
     : (state.strikes.length ? Math.max(...state.strikes.map(s => s.sessionMs)) : 0);
   const span = Math.max(60_000, sessionDur); // at least 60s axis
+  // The axis only grows a second at a time, so redraw at 1 Hz plus on new events.
+  if (!changed('timeline', `${state.strikes.length}|${state.markers.length}|${Math.floor(span/1000)}`)) return;
   axis.innerHTML = `<span>0:00</span><span>${fmtClock(span/2)}</span><span>${fmtClock(span)}</span>`;
 
   const items = [];
@@ -398,6 +438,8 @@ function renderStrikeLog() {
   const tbody = $('strikeTbody');
   if (!tbody) return;
   const filter = state.ui.strikeFilter;
+  // 80 rows × innerHTML + one click handler each, 60×/s, was the worst offender.
+  if (!changed('strikeLog', `${filter}|${state.strikes.length}|${state.strikeSeq}`)) return;
   const rows = state.strikes
     .filter(s => filter === 'all' || String(s.slot) === filter)
     .slice(-80).reverse();
@@ -444,6 +486,8 @@ function renderNodes() {
     [n.mac, n.slot, n.batteryPct, Math.round((n.rssi || 0) / 3), n.packetsRx, n.seqGaps,
      (n.ageMs || 0) > 3000 ? 1 : 0,
      (n.ageMs || 0) > 10000 ? 1 : 0,
+     n.sensorFault ? 1 : 0, n.linkFault ? 1 : 0, n.battUnwired ? 1 : 0, n.battMv || 0,
+     n.charging ? 1 : 0, n.battTrendMv || 0,
      state.calibration.offsets.has(n.slot) ? 1 : 0,
      state.calibration.activeSlots.has(n.slot) ? 1 : 0].join(',')).join('|');
   if (sig === _lastNodesSig) return;
@@ -455,9 +499,18 @@ function renderNodes() {
     const cls    = `node-card ${isOffline ? 'offline' : isStale ? 'stale' : 'live'}`;
     const bcls   = n.batteryPct >= 50 ? '' : n.batteryPct >= 20 ? 'low' : 'crit';
     const rssiBars = renderRssiBars(n.rssi);
+    // "ยังไม่ได้ต่อวงจรวัดแบต" must not look like "แบตหมด" — a flat red 0 % bar
+    // would send a coach hunting for a charger that isn't the problem.
+    // Charging is inferred from the voltage trend (no charge-sense wire fitted),
+    // so show the trend that justified it — a coach can sanity-check the claim.
+    const trend = n.battTrendMv || 0;
+    const battTxt = n.battUnwired ? 'ไม่ได้ต่อวงจรวัด'
+                  : n.battMv      ? `${n.charging ? '⚡ ' : ''}${n.batteryPct}% · ${(n.battMv / 1000).toFixed(2)}V`
+                                    + (trend ? ` (${trend > 0 ? '+' : ''}${trend}mV)` : '')
+                  : `${n.batteryPct}%`;
 
     // battery low warn (throttle: once per 60s per mac)
-    if (n.batteryPct > 0 && n.batteryPct < 20) {
+    if (!n.battUnwired && n.batteryPct > 0 && n.batteryPct < 20) {
       const last = lastBatteryWarn.get(n.mac) || 0;
       if (Date.now() - last > 60_000) {
         lastBatteryWarn.set(n.mac, Date.now());
@@ -482,6 +535,8 @@ function renderNodes() {
           <span class="nc-age">${isOffline ? `⚠ ออฟไลน์ ${Math.round((n.ageMs||0)/1000)}s · รอเชื่อมต่อ`
                                 : isStale ? `${Math.round((n.ageMs||0)/1000)}s` : 'สด'}</span>
         </div>
+        ${n.sensorFault ? `<div class="nc-fault">⚠ เซนเซอร์ไม่ตอบสนอง — วิทยุปกติแต่ BMI160 อ่านไม่ได้ · กด "แก้อาการค้าง"</div>` : ''}
+        ${n.linkFault   ? `<div class="nc-fault">⚠ ส่งข้อมูลไม่ออก — โหนดกำลังพยายามเชื่อมใหม่เอง</div>` : ''}
         <div class="nc-row">
           <span class="meta-k">SLOT</span>
           <select class="nc-slot-sel" data-mac="${n.mac}">
@@ -495,7 +550,7 @@ function renderNodes() {
         <div class="nc-row">
           <span class="meta-k">SIGNAL</span>${rssiBars}<span class="mono">${n.rssi} dBm</span>
           <span class="meta-k">BATT</span>
-          <span class="batt"><span class="batt-bar"><span class="batt-fill ${bcls}" style="width:${n.batteryPct}%"></span></span><span class="mono">${n.batteryPct}%</span></span>
+          <span class="batt"><span class="batt-bar"><span class="batt-fill ${n.battUnwired ? 'unwired' : bcls}" style="width:${n.battUnwired ? 0 : n.batteryPct}%"></span></span><span class="mono">${battTxt}</span></span>
         </div>
         <div class="nc-row">
           <span class="meta-k">RX</span><span class="mono">${n.packetsRx}</span>
@@ -508,6 +563,7 @@ function renderNodes() {
           <button class="ico-btn" data-act="cal"     data-slot="${n.slot}" data-mac="${n.mac}" ${n.slot === 0 || isCalibrating ? 'disabled' : ''}>${isCalibrating ? 'CALIBRATING…' : (cal ? 'RE-CAL' : 'CALIBRATE')}</button>
           ${cal ? `<button class="ico-btn" data-act="cal-clear" data-slot="${n.slot}">CLEAR</button>` : ''}
           <button class="ico-btn" data-act="hist" data-mac="${n.mac}">ประวัติ</button>
+          <button class="ico-btn" data-act="fix" data-mac="${n.mac}">🛠 แก้อาการค้าง</button>
           ${isOffline ? `<button class="ico-btn danger" data-act="forget" data-mac="${n.mac}">ลืมอุปกรณ์</button>` : ''}
         </div>
       </div>`;
@@ -534,6 +590,7 @@ function renderNodes() {
         if (confirm(`ล้างค่าคาลิเบรตของ ${SLOT_NAMES[slot]}?`)) clearCalibration(slot);
       }
       else if (act === 'hist') openNodeHistoryModal(mac);
+      else if (act === 'fix')  openNodeRecoveryModal(mac);
       else if (act === 'forget') {
         if (confirm(`ลืมอุปกรณ์ ${mac.slice(-5)}? (จะหายจากรายการจนกว่าจะเปิดใหม่)`)) {
           api.nodeForget(mac)
@@ -977,6 +1034,81 @@ function calBodySvg() {
   </svg>`;
 }
 
+// ───── NODE RECOVERY MODAL ─────
+// For the "the node shows up but no data comes through" case. Offers the fixes in
+// order of how disruptive they are, so you try the cheap one first: identify the
+// physical unit → reset just the radio link → reboot the node's board.
+function openNodeRecoveryModal(mac) {
+  const n = state.nodes.find(x => x.mac === mac);
+  const age = n ? Math.round((n.ageMs || 0) / 1000) : 0;
+  const rx  = n ? n.packetsRx : 0;
+
+  openModal(`
+    <div class="dlg-head">
+      <div class="dlg-title">แก้อาการโหนดค้าง · ${mac.slice(-5)}</div>
+      <button class="dlg-x" id="nrX">✕</button>
+    </div>
+    <div class="detail-grid">
+      <div class="stat"><div class="stat-lbl">ล่าสุด</div><div class="stat-val mono" style="font-size:20px">${age}s</div></div>
+      <div class="stat"><div class="stat-lbl">แพ็กเก็ต</div><div class="stat-val mono" style="font-size:20px">${rx}</div></div>
+      <div class="stat"><div class="stat-lbl">สัญญาณ</div><div class="stat-val mono" style="font-size:20px">${n ? n.rssi : '—'}</div></div>
+      <div class="stat"><div class="stat-lbl">แบต</div><div class="stat-val mono" style="font-size:20px">${n ? n.batteryPct + '%' : '—'}</div></div>
+    </div>
+    ${n?.sensorFault ? `<div class="cal-note warn">⚠ โหนดรายงานเองว่า <b>อ่านเซนเซอร์ BMI160 ไม่ได้</b> — วิทยุยังปกติ แต่ไม่มีข้อมูลการเคลื่อนไหว มักเป็นสายเซนเซอร์หลวมหรือบัดกรีไม่ติด ลองขั้นที่ 3 ก่อน ถ้าไม่หายต้องเช็คฮาร์ดแวร์</div>` : ''}
+    ${n?.linkFault ? `<div class="cal-note warn">⚠ โหนดรายงานเองว่า <b>ส่งข้อมูลไม่ออก</b> — กำลังพยายามเชื่อมใหม่เอง</div>` : ''}
+    <ol class="cal-steps" style="margin-top:12px">
+      <li><span class="cal-step-num">1</span><div>
+        <strong>ระบุตัวเครื่อง</strong>
+        <span class="dim">ไฟที่โหนดจะกะพริบ ~10 ครั้ง — ยืนยันว่ากำลังคุยกับตัวที่ถูก</span>
+        <button class="ico-btn nr-act" data-nr="identify">🔦 สั่งกะพริบไฟ</button>
+      </div></li>
+      <li><span class="cal-step-num">2</span><div>
+        <strong>รีเซ็ตการเชื่อมต่อ</strong>
+        <span class="dim">ผูก ESP-NOW peer ใหม่ + ล้างตัวนับที่ค้าง — ไม่ต้องปิดเครื่อง ไม่เสียการจับคู่อวัยวะ</span>
+        <button class="ico-btn nr-act" data-nr="link">⟳ รีเซ็ตการเชื่อมต่อ</button>
+      </div></li>
+      <li><span class="cal-step-num">3</span><div>
+        <strong>รีสตาร์ทบอร์ดโหนด</strong>
+        <span class="dim">สั่งรีบูตข้ามอากาศ กลับมาใน ~3 วินาที (ถ้าโหนดยังรับคำสั่งได้)</span>
+        <button class="ico-btn danger nr-act" data-nr="restart">↻ รีสตาร์ทบอร์ด</button>
+      </div></li>
+    </ol>
+    <div class="cal-note dim" id="nrResult">เลือกทีละขั้นจากบนลงล่าง</div>
+    <div class="dlg-actions">
+      <button class="dlg-btn" id="nrClose">ปิด</button>
+    </div>
+  `);
+
+  document.getElementById('nrX').addEventListener('click', closeModal);
+  document.getElementById('nrClose').addEventListener('click', closeModal);
+
+  const out = document.getElementById('nrResult');
+  const RUN = {
+    identify: { fn: () => api.nodeIdentify(mac),  ok: '🔦 ส่งคำสั่งแล้ว — ดูไฟที่โหนดว่ากะพริบไหม' },
+    link:     { fn: () => api.nodeLinkReset(mac), ok: '⟳ รีเซ็ตการเชื่อมต่อแล้ว — รอ 2-3 วินาทีให้ตัวนับเดินใหม่' },
+    restart:  { fn: () => api.nodeRestart(mac),   ok: '↻ สั่งรีบูตแล้ว — โหนดจะหายไปสักครู่แล้วกลับมาเอง' },
+  };
+  document.querySelectorAll('.nr-act').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const step = RUN[btn.dataset.nr];
+      const label = btn.textContent;
+      btn.disabled = true; btn.textContent = 'กำลังส่ง…';
+      try {
+        await step.fn();
+        out.className = 'cal-note';
+        out.textContent = step.ok;
+        pushActivity('node', `${step.ok.slice(0, 2)} ${mac.slice(-5)}`);
+        refreshNodes();
+      } catch (e) {
+        out.className = 'cal-note warn';
+        out.textContent = `ส่งคำสั่งไม่สำเร็จ: ${e.message} — ถ้าโหนดไม่ตอบเลย ให้ลอง "รีสตาร์ทวิทยุ" ในแท็บระบบ หรือปิด-เปิดโหนดด้วยมือ`;
+      } finally {
+        btn.disabled = false; btn.textContent = label;
+      }
+    });
+  });
+}
+
 // ───── NODE HISTORY MODAL ─────
 function openNodeHistoryModal(mac) {
   const h = state.nodeHistory.get(mac);
@@ -1041,6 +1173,14 @@ let _libFilter = '';
 function renderLibrary() {
   const list = $('libList');
   if (!list) return;
+  // Only visible on its own tab, and the data behind it refreshes every 10 s.
+  const sd = state.hostStatus?.sd;
+  if (!changed('library', [
+        state.ui.activeTab, _libFilter, state.sessions.length,
+        state.sessions.reduce((a, s) => a + (s.bytes || 0), 0),
+        state.sessions[0]?.id || '', [...state.ui.compareSet].join(','),
+        sd?.usedMB ?? '', sd?.cardMB ?? '',
+      ].join('|'))) return;
   const q = _libFilter.toLowerCase();
   const filtered = state.sessions.filter(s => !q || s.id.toLowerCase().includes(q));
   const total = state.sessions.length;
@@ -1069,7 +1209,7 @@ function renderLibrary() {
         </div>
         <span class="lib-size">${fmtBytes(s.bytes)}</span>
         <span class="lib-cmp-box ${isCmp?'checked':''}" data-act="cmp" data-id="${s.id}" title="Compare">${isCmp ? '✓' : ''}</span>
-        <button class="ico-btn" data-act="view" data-id="${s.id}">VIEW</button>
+        <button class="ico-btn primary" data-act="view" data-id="${s.id}">▶ ดูย้อนหลัง</button>
         <button class="ico-btn" data-act="dl"  data-id="${s.id}">↓</button>
         <button class="ico-btn danger" data-act="del" data-id="${s.id}">✕</button>
       </div>`;
@@ -1089,7 +1229,7 @@ function renderLibrary() {
         try { await api.sessionDelete(id); toast('Deleted', 'ok'); refreshLibrary(); }
         catch (err) { toast(`Delete failed: ${err.message}`, 'warn'); }
       } else if (act === 'view') {
-        openSessionPreview(id);
+        openSessionReplay(id);
       } else if (act === 'cmp') {
         if (state.ui.compareSet.has(id)) state.ui.compareSet.delete(id);
         else if (state.ui.compareSet.size < 2) state.ui.compareSet.add(id);
@@ -1103,6 +1243,8 @@ function renderLibrary() {
 // ───── SYSTEM ─────
 function renderSystem() {
   const h = state.hostStatus;
+  // Driven entirely by the 1.5 s status poll — repainting it per frame is waste.
+  if (!changed('system', `${state.ui.activeTab}|${h?.uptimeMs ?? ''}|${h?.heap ?? ''}|${h?.rx ?? ''}|${h?.dropped ?? ''}|${h?.wsClients ?? ''}|${state.measuredHz}`)) return;
   if (h) {
     $('sysUp').textContent    = fmtClock(h.uptimeMs);
     $('sysHeap').textContent  = `${(h.heap/1024).toFixed(0)} KB`;
@@ -1273,24 +1415,240 @@ function openStrikeDetail(id) {
   `);
 }
 
-function openSessionPreview(id) {
-  const s = state.sessions.find(x => x.id === id);
-  if (!s) return;
-  openModal(`
+// ───── SESSION REPLAY ─────
+// Watch a recording back: overview numbers first, then a scrubbable timeline with
+// play/pause. Written for a coach, not a programmer — no CSV, no columns, no
+// jargon. The file is streamed and reduced as it arrives (see replay.js), so a
+// long session doesn't have to fit in the phone's memory.
+function openSessionReplay(id) {
+  const meta = state.sessions.find(x => x.id === id);
+  const controller = new AbortController();
+  let player = null;
+
+  const body = openModal(`
     <div class="dlg-head">
-      <div class="dlg-title">SESSION ${s.id}</div>
-      <button class="dlg-x" onclick="document.getElementById('appDialog').close()">✕</button>
+      <div class="dlg-title">ดูย้อนหลัง</div>
+      <button class="dlg-x" id="rpX">✕</button>
     </div>
-    <div class="detail-grid">
-      <div class="stat"><div class="stat-lbl">SIZE</div><div class="stat-val mono" style="font-size:22px">${fmtBytes(s.bytes)}</div></div>
-      <div class="stat"><div class="stat-lbl">DATE</div><div class="stat-val mono" style="font-size:18px">${fmtDate(s.modTime)}</div></div>
+    <div class="rp-loading" id="rpLoading">
+      <div class="rp-load-title">กำลังโหลดการซ้อม…</div>
+      <div class="bar"><span class="bar-fill" id="rpBar" style="width:0%"></span></div>
+      <div class="rp-load-sub mono dim" id="rpLoadSub">เริ่มดาวน์โหลด…</div>
+      <div class="cal-note dim" style="margin-top:10px">
+        ไฟล์บันทึกละเอียด 400 ครั้ง/วินาที — ถ้าซ้อมนานอาจใช้เวลาสักครู่
+        ระหว่างนี้ข้อมูลสดจะหยุดชั่วคราวเพื่อให้โหลดได้เร็วที่สุด
+      </div>
+      <div class="dlg-actions">
+        <button class="dlg-btn" id="rpCancel">ยกเลิก</button>
+      </div>
     </div>
-    <div class="dlg-actions">
-      <button class="dlg-btn" onclick="document.getElementById('appDialog').close()">CLOSE</button>
-      <a class="dlg-btn primary" href="${api.sessionDownloadUrl(id)}" download="${id}.csv">↓ DOWNLOAD CSV</a>
-    </div>
-  `);
+  `, { onClose: () => { controller.abort(); player?.destroy(); } });
+
+  document.getElementById('rpX').addEventListener('click', closeModal);
+  document.getElementById('rpCancel').addEventListener('click', closeModal);
+
+  const bar = document.getElementById('rpBar');
+  const sub = document.getElementById('rpLoadSub');
+
+  loadSession(api.sessionDownloadUrl(id), state.tuning, ({ bytes, total, rows }) => {
+    const known = total || meta?.bytes || 0;
+    const pct = known ? Math.min(100, (bytes / known) * 100) : 0;
+    if (bar) bar.style.width = `${pct || 3}%`;
+    if (sub) sub.textContent = known
+      ? `${fmtBytes(bytes)} / ${fmtBytes(known)} · ${rows.toLocaleString()} จุดข้อมูล`
+      : `${fmtBytes(bytes)} · ${rows.toLocaleString()} จุดข้อมูล`;
+  }, controller.signal)
+    .then(session => { if (!controller.signal.aborted) renderReplay(body, id, meta, session, p => player = p); })
+    .catch(err => {
+      if (controller.signal.aborted) return;
+      const el = document.getElementById('rpLoading');
+      if (el) el.innerHTML = `
+        <div class="cal-note warn">โหลดไม่สำเร็จ: ${escapeHtml(err.message)}</div>
+        <div class="cal-note dim">ถ้าโหลดค้างบ่อย ลองเข้าใกล้เครื่องมากขึ้น หรือกด "ต่อสตรีมใหม่" ในแท็บระบบ</div>
+        <div class="dlg-actions"><button class="dlg-btn" onclick="document.getElementById('appDialog').close()">ปิด</button></div>`;
+    });
 }
+
+function renderReplay(body, id, meta, session, setPlayer) {
+  const S = session.summary;
+  const dur = session.durationMs;
+
+  body.innerHTML = `
+    <div class="dlg-head">
+      <div class="dlg-title">${escapeHtml(session.meta.athlete || 'การซ้อม')} · ${fmtDate(meta?.modTime)}</div>
+      <button class="dlg-x" id="rpX2">✕</button>
+    </div>
+
+    <div class="rp-summary">
+      <div class="rp-card"><div class="rp-k">เวลาซ้อม</div><div class="rp-v">${fmtClock(dur)}</div></div>
+      <div class="rp-card"><div class="rp-k">ออกอาวุธ</div><div class="rp-v">${S.strikes}<span class="rp-u">ครั้ง</span></div></div>
+      <div class="rp-card"><div class="rp-k">แรงสูงสุด</div><div class="rp-v">${S.peakG.toFixed(1)}<span class="rp-u">g</span></div></div>
+      <div class="rp-card"><div class="rp-k">แรงเฉลี่ย</div><div class="rp-v">${S.avgG.toFixed(1)}<span class="rp-u">g</span></div></div>
+      <div class="rp-card"><div class="rp-k">ความถี่</div><div class="rp-v">${S.spm.toFixed(0)}<span class="rp-u">ครั้ง/นาที</span></div></div>
+      <div class="rp-card"><div class="rp-k">ซ้าย / ขวา</div><div class="rp-v">${S.left}<span class="rp-u">:</span>${S.right}</div></div>
+    </div>
+
+    <div class="rp-limbs">
+      ${[1, 2, 3, 4].map(s => `
+        <div class="rp-limb" data-slot="${s}">
+          <span class="rp-limb-n">${SLOT_NAMES_TH[s]}</span>
+          <span class="rp-limb-c mono">${S.perSlot[s]}</span>
+        </div>`).join('')}
+    </div>
+
+    <canvas class="rp-canvas" id="rpCanvas" height="150"></canvas>
+
+    <div class="rp-controls">
+      <button class="rp-btn" id="rpPrev" title="อาวุธก่อนหน้า">⏮</button>
+      <button class="rp-btn rp-play" id="rpPlay">▶ เล่น</button>
+      <button class="rp-btn" id="rpNext" title="อาวุธถัดไป">⏭</button>
+      <span class="rp-time mono" id="rpTime">00:00 / ${fmtClock(dur)}</span>
+      <select class="rp-rate" id="rpRate">
+        <option value="0.5">0.5×</option>
+        <option value="1" selected>1×</option>
+        <option value="2">2×</option>
+        <option value="4">4×</option>
+      </select>
+    </div>
+    <input class="rp-seek" id="rpSeek" type="range" min="0" max="${Math.max(1, dur)}" value="0" step="10">
+
+    <div class="rp-now" id="rpNow">— กด ▶ เพื่อดูการซ้อมย้อนหลัง —</div>
+
+    <div class="kicker mt-4">รายการอาวุธ · ${S.strikes} ครั้ง</div>
+    <div class="rp-list" id="rpList">
+      ${session.strikes.length
+        ? session.strikes.map(x => `
+            <div class="rp-row" data-t="${x.tMs}" data-id="${x.id}">
+              <span class="rp-row-t mono">${fmtClock(x.tMs)}</span>
+              <span class="slot-tag s${x.slot}">${SLOT_SHORT[x.slot]}</span>
+              <span class="rp-row-type">${x.type.toUpperCase()}</span>
+              <span class="rp-row-g mono">${x.peakG.toFixed(1)}g</span>
+            </div>`).join('')
+        : '<div class="dim small">— ไม่พบการออกอาวุธในไฟล์นี้ —</div>'}
+    </div>
+
+    <div class="dlg-actions">
+      <button class="dlg-btn" id="rpClose">ปิด</button>
+      <a class="dlg-btn" href="${api.sessionDownloadUrl(id)}" download="${id}.csv">↓ บันทึกไฟล์ดิบ</a>
+    </div>
+  `;
+
+  document.getElementById('rpX2').addEventListener('click', closeModal);
+  document.getElementById('rpClose').addEventListener('click', closeModal);
+
+  const cv    = document.getElementById('rpCanvas');
+  const seek  = document.getElementById('rpSeek');
+  const btnPlay = document.getElementById('rpPlay');
+  const elTime  = document.getElementById('rpTime');
+  const elNow   = document.getElementById('rpNow');
+  const list    = document.getElementById('rpList');
+  const rows    = [...list.querySelectorAll('.rp-row')];
+
+  const player = new Playback(session);
+  setPlayer(player);
+
+  // Size the canvas to its box, accounting for device pixel ratio so the
+  // waveform isn't a blurry mess on a phone.
+  const fitCanvas = () => {
+    const dpr = Math.min(2, window.devicePixelRatio || 1);
+    const w = cv.clientWidth || 320;
+    cv.width  = Math.round(w * dpr);
+    cv.height = Math.round(150 * dpr);
+    cv.getContext('2d').setTransform(dpr, 0, 0, dpr, 0, 0);
+    draw(player.tMs);
+  };
+
+  const SLOT_COLOR = { 1: '#d62631', 2: '#e8a33d', 3: '#4ac294', 4: '#7aa2f7' };
+
+  function draw(tMs) {
+    const ctx = cv.getContext('2d');
+    const W = cv.clientWidth || 320, H = 150;
+    const laneH = H / 4;
+    ctx.clearRect(0, 0, W, H);
+
+    for (let s = 1; s <= 4; s++) {
+      const y0 = (s - 1) * laneH;
+      ctx.fillStyle = 'rgba(255,255,255,.03)';
+      ctx.fillRect(0, y0, W, laneH - 1);
+      ctx.fillStyle = 'rgba(255,255,255,.35)';
+      ctx.font = '9px monospace';
+      ctx.fillText(SLOT_SHORT[s], 3, y0 + 10);
+
+      const env = session.envelope[s];
+      ctx.strokeStyle = SLOT_COLOR[s];
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      for (let x = 0; x < W; x++) {
+        // one pixel can span many buckets on a long session — take the peak
+        const b0 = Math.floor((x / W) * session.nBuckets);
+        const b1 = Math.max(b0 + 1, Math.floor(((x + 1) / W) * session.nBuckets));
+        let v = 0;
+        for (let b = b0; b < b1 && b < session.nBuckets; b++) if (env[b] > v) v = env[b];
+        const y = y0 + laneH - 1 - Math.min(laneH - 2, (v / 16) * (laneH - 2));
+        x === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+      }
+      ctx.stroke();
+    }
+
+    // playhead
+    const px = dur > 0 ? (tMs / dur) * W : 0;
+    ctx.strokeStyle = '#fff';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.moveTo(px, 0); ctx.lineTo(px, H); ctx.stroke();
+  }
+
+  // Which strike is "now" — drives the highlight and the big readout.
+  let curIdx = -1;
+  function update(tMs) {
+    seek.value = String(Math.round(tMs));
+    elTime.textContent = `${fmtClock(tMs)} / ${fmtClock(dur)}`;
+    draw(tMs);
+
+    let idx = -1;
+    for (let i = 0; i < session.strikes.length; i++) {
+      if (session.strikes[i].tMs <= tMs + 1) idx = i; else break;
+    }
+    // treat a strike as "current" for a moment after it lands
+    const cur = idx >= 0 ? session.strikes[idx] : null;
+    const fresh = cur && (tMs - cur.tMs) < 900;
+    elNow.innerHTML = fresh
+      ? `<span class="rp-now-slot s${cur.slot}">${SLOT_NAMES_TH[cur.slot]}</span>
+         <span class="rp-now-type">${cur.type.toUpperCase()}</span>
+         <span class="rp-now-g mono">${cur.peakG.toFixed(1)}g</span>
+         <span class="dim mono">· ${Math.round(cur.peakDps)}°/s</span>`
+      : `<span class="dim">— ${session.strikes.length ? 'รอจังหวะถัดไป' : 'ไม่มีข้อมูลอาวุธ'} —</span>`;
+
+    if (idx !== curIdx) {
+      if (rows[curIdx]) rows[curIdx].classList.remove('is-cur');
+      if (rows[idx]) {
+        rows[idx].classList.add('is-cur');
+        // keep the current row in view without yanking the whole page around
+        const r = rows[idx], p = list;
+        if (r.offsetTop < p.scrollTop || r.offsetTop > p.scrollTop + p.clientHeight - 30) {
+          p.scrollTop = r.offsetTop - p.clientHeight / 2;
+        }
+      }
+      curIdx = idx;
+    }
+  }
+  player.onTick = update;
+
+  btnPlay.addEventListener('click', () => {
+    player.toggle();
+    btnPlay.textContent = player.playing ? '⏸ หยุด' : '▶ เล่น';
+    btnPlay.classList.toggle('is-playing', player.playing);
+  });
+  document.getElementById('rpPrev').addEventListener('click', () => player.step(-1));
+  document.getElementById('rpNext').addEventListener('click', () => player.step(1));
+  document.getElementById('rpRate').addEventListener('change', e => player.setRate(Number(e.target.value)));
+  seek.addEventListener('input', e => player.seek(Number(e.target.value)));
+  rows.forEach(r => r.addEventListener('click', () => player.seek(Number(r.dataset.t))));
+
+  window.addEventListener('resize', fitCanvas);
+  requestAnimationFrame(() => { fitCanvas(); update(0); });
+}
+
+const SLOT_NAMES_TH = { 1: 'มือซ้าย', 2: 'มือขวา', 3: 'แข้งซ้าย', 4: 'แข้งขวา' };
 
 function openCompareModal() {
   const ids = [...state.ui.compareSet];
@@ -1351,6 +1709,89 @@ export function openGoalsModal() {
 let saveGoalsCb = null;
 export function bindSaveGoals(fn) { saveGoalsCb = fn; }
 
+// ───── FACTORY RESET ─────
+// Puts the rig back to out-of-the-box state: the Main Node forgets every pairing
+// and re-arms the first-run wizard, and this browser drops its saved settings,
+// calibration and cached AI model. Recordings and the stored model are opt-in so
+// a coach can re-provision the hardware without losing a season of data.
+export function openFactoryResetModal() {
+  const busyRecording = state.session.active;
+  openModal(`
+    <div class="dlg-head">
+      <div class="dlg-title">รีเซ็ตเป็นค่าจากโรงงาน</div>
+      <button class="dlg-x" id="frX">✕</button>
+    </div>
+    <div class="cal-note warn">
+      อุปกรณ์จะกลับไปเหมือนเพิ่งแกะกล่อง แล้ว <b>รีสตาร์ทเอง</b> —
+      หลังจากนั้นจะขึ้นหน้าตั้งค่าครั้งแรกให้เขย่าจับคู่เซนเซอร์ใหม่
+    </div>
+    <ul class="cal-steps" style="margin-top:10px">
+      <li><span class="cal-step-num">1</span><div>
+        <strong>ล้างการจับคู่เซนเซอร์ทั้งหมด</strong>
+        <span class="dim">โหนดทุกตัวกลับเป็น "ยังไม่กำหนด"</span>
+      </div></li>
+      <li><span class="cal-step-num">2</span><div>
+        <strong>ล้างค่าบนเครื่องนี้</strong>
+        <span class="dim">ค่าคาลิเบรต · เป้าหมาย · ธีม · ชื่อนักกีฬา · โมเดล AI ที่แคชไว้</span>
+      </div></li>
+      <li><span class="cal-step-num">3</span><div>
+        <strong>เปิดตัวช่วยตั้งค่าครั้งแรกอีกครั้ง</strong>
+        <span class="dim">ทุกเครื่องที่ต่อเข้ามาจะเห็นหน้าตั้งค่าใหม่</span>
+      </div></li>
+    </ul>
+    <div class="dlg-row" style="grid-template-columns:1fr">
+      <label class="check"><input type="checkbox" id="frSessions"> ลบไฟล์บันทึกทั้งหมดใน SD card <span class="dim">(กู้คืนไม่ได้)</span></label>
+    </div>
+    <div class="dlg-row" style="grid-template-columns:1fr;margin-top:-4px">
+      <label class="check"><input type="checkbox" id="frModel"> ลบโมเดล AI ที่เก็บไว้บนการ์ด</label>
+    </div>
+    ${busyRecording ? `<div class="cal-note warn">⚠ กำลังบันทึกอยู่ — ระบบจะหยุดและปิดไฟล์ให้ก่อน</div>` : ''}
+    <div class="dlg-actions">
+      <button class="dlg-btn" id="frCancel">ยกเลิก</button>
+      <button class="dlg-btn danger" id="frGo">รีเซ็ตอุปกรณ์</button>
+    </div>
+  `);
+
+  document.getElementById('frX').addEventListener('click', closeModal);
+  document.getElementById('frCancel').addEventListener('click', closeModal);
+
+  const go = document.getElementById('frGo');
+  let armed = false;
+  go.addEventListener('click', async () => {
+    // Two-step: the first press only arms it. One stray tap must not wipe a rig.
+    if (!armed) {
+      armed = true;
+      go.textContent = 'กดอีกครั้งเพื่อยืนยัน ⚠';
+      setTimeout(() => { if (armed) { armed = false; go.textContent = 'รีเซ็ตอุปกรณ์'; } }, 5000);
+      return;
+    }
+    const wipeSessions = document.getElementById('frSessions').checked;
+    const wipeModel    = document.getElementById('frModel').checked;
+    go.disabled = true;
+    go.textContent = 'กำลังรีเซ็ต…';
+    try {
+      const res = await api.factoryReset({ wipeSessions, wipeModel });
+      persist.clearAll();                       // browser half of the reset
+      const wait = (res?.rebootInMs || 800) + 3500;
+      openModal(`
+        <div class="dlg-head"><div class="dlg-title">รีเซ็ตแล้ว · กำลังรีสตาร์ท</div></div>
+        <div class="cal-result-ok">✓</div>
+        <div class="cal-note dim" style="text-align:center">
+          ลบไฟล์บันทึก ${res?.sessionsRemoved ?? 0} ไฟล์${res?.modelRemoved ? ' · ลบโมเดล AI แล้ว' : ''}<br>
+          โหนดหลักกำลังรีสตาร์ท — หน้าเว็บจะโหลดใหม่เองใน ${Math.round(wait/1000)} วินาที<br>
+          <span class="dim">ถ้า WiFi หลุด ให้ต่อ <b>StrikeSense</b> ใหม่แล้วเปิด 192.168.4.1</span>
+        </div>
+      `);
+      setTimeout(() => location.reload(), wait);
+    } catch (err) {
+      go.disabled = false;
+      armed = false;
+      go.textContent = 'รีเซ็ตอุปกรณ์';
+      toast(`รีเซ็ตไม่สำเร็จ: ${err.message}`, 'warn');
+    }
+  });
+}
+
 export function openShortcutsModal() {
   openModal(`
     <div class="dlg-head">
@@ -1402,7 +1843,8 @@ export function renderAll() {
 }
 
 // ───── INIT ─────
-export function initUi() {
+export function initUi(activeApi) {
+  if (activeApi) api = activeApi;
   setupTabs();
   setupChips();
   setupBodyZones();
@@ -1416,8 +1858,40 @@ export function initUi() {
     refreshNodes();
     toast('กำลังค้นหาโหนดใหม่…', 'ok');
   });
+  $('btnFactoryReset')?.addEventListener('click', openFactoryResetModal);
+
+  // ── recovery controls (SYSTEM tab) ──
+  $('btnReconnectWs')?.addEventListener('click', () => {
+    reconnectStream('ผู้ใช้สั่งต่อใหม่');
+    toast('⇄ กำลังต่อสตรีมใหม่…', 'ok');
+  });
+  $('btnRadioRestart')?.addEventListener('click', async (e) => {
+    const b = e.currentTarget, label = b.textContent;
+    b.disabled = true; b.textContent = 'กำลังรีสตาร์ท…';
+    try {
+      await api.radioRestart();
+      toast('📡 รีสตาร์ทวิทยุ ESP-NOW แล้ว — โหนดจะทยอยกลับมาใน 2-5 วินาที', 'ok');
+      pushActivity('node', '📡 รีสตาร์ทวิทยุ ESP-NOW');
+      refreshNodes();
+    } catch (err) { toast(`รีสตาร์ทวิทยุไม่สำเร็จ: ${err.message}`, 'warn'); }
+    finally { b.disabled = false; b.textContent = label; }
+  });
+  $('btnMainReboot')?.addEventListener('click', async (e) => {
+    if (!confirm('รีบูตโหนดหลัก? การบันทึกที่กำลังทำอยู่จะถูกปิดไฟล์และหยุด')) return;
+    const b = e.currentTarget, label = b.textContent;
+    b.disabled = true; b.textContent = 'กำลังรีบูต…';
+    try {
+      const res = await api.systemReboot();
+      const wait = (res?.rebootInMs || 600) + 4000;
+      toast(`↻ โหนดหลักกำลังรีบูต — หน้าเว็บจะโหลดใหม่ใน ${Math.round(wait / 1000)} วินาที`, 'ok');
+      setTimeout(() => location.reload(), wait);
+    } catch (err) {
+      toast(`รีบูตไม่สำเร็จ: ${err.message}`, 'warn');
+      b.disabled = false; b.textContent = label;
+    }
+  });
   $('buildStamp').textContent = new Date().toISOString().slice(0,10).replace(/-/g,'');
 }
 
 // Re-export modal helpers
-export { addMarker, deleteMarker, openStrikeDetail, openSessionPreview };
+export { addMarker, deleteMarker, openStrikeDetail, openSessionReplay };

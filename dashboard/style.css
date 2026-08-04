@@ -198,6 +198,39 @@ body {
 /* ════════ DEV MODE gating ════════ */
 /* Data Logger is a developer tool — hidden unless dev mode is on */
 body:not(.is-dev) .logger-block { display: none; }
+body:not(.is-dev) .diag-block   { display: none; }
+body:not(.is-dev) .ai-block     { display: none; }
+
+/* ──────── dev-mode diagnostic console ──────── */
+.diag-bar { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+.diag-bar .search { flex: 1 1 140px; min-width: 0; }
+.diag-stat { margin: 6px 0 4px; }
+.diag-list {
+  max-height: 320px; overflow-y: auto; -webkit-overflow-scrolling: touch;
+  background: var(--ink-0); border: 1px solid var(--rule-2); border-radius: var(--radius);
+  padding: 6px 8px; font-size: 10.5px; line-height: 1.5;
+}
+.diag-row { display: grid; grid-template-columns: 46px 58px 1fr; gap: 6px; padding: 2px 0; }
+.diag-row + .diag-row { border-top: 1px dashed rgba(255,255,255,.05); }
+.diag-t   { color: var(--paper-3); }
+.diag-cat { color: var(--gold); letter-spacing: .06em; }
+.diag-msg { color: var(--paper-2); word-break: break-word; }
+/* colour by subsystem so a problem stands out while scrolling */
+.diag-ws   .diag-cat { color: var(--teal-on); }
+.diag-http .diag-cat { color: #7aa2f7; }
+.diag-batt .diag-cat { color: var(--amber); }
+.diag-sd   .diag-cat,
+.diag-espnow .diag-cat { color: var(--blood-bright); }
+.diag-app  .diag-cat { color: var(--paper-3); }
+
+@media (max-width: 760px), (pointer: coarse) {
+  .diag-list { max-height: 46vh; font-size: 11.5px; }
+  .diag-row { grid-template-columns: 44px 56px 1fr; }
+  /* filter gets its own row, the three buttons share the next one evenly —
+     otherwise "ล้าง" wraps alone and looks like a stray control */
+  .diag-bar .search { flex: 1 1 100%; }
+  .diag-bar .chip { flex: 1 1 0; min-height: 42px; }
+}
 
 .dev-toggle-row {
   display: flex; align-items: center; justify-content: space-between; gap: 12px;
@@ -387,6 +420,148 @@ body:not(.is-dev) .logger-block { display: none; }
 }
 .tour-launch:hover { background: var(--ink-3); border-color: var(--gold); }
 
+/* ════════ SESSION REPLAY ════════ */
+.rp-loading { padding: 6px 0 2px; }
+.rp-load-title { font: 700 15px var(--f-display); letter-spacing: .04em; margin-bottom: 10px; }
+.rp-load-sub { margin-top: 8px; font-size: 11px; }
+
+.rp-summary { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin: 10px 0; }
+.rp-card {
+  background: var(--ink-2); border: 1px solid var(--rule-2);
+  border-radius: var(--radius); padding: 8px 10px;
+}
+.rp-k { font: 600 9px var(--f-body); letter-spacing: .16em; color: var(--paper-3); text-transform: uppercase; }
+.rp-v { font: 700 22px/1.1 var(--f-mono); color: var(--paper); margin-top: 3px; }
+.rp-u { font-size: 11px; color: var(--paper-3); margin-left: 3px; }
+
+.rp-limbs { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; margin-bottom: 10px; }
+.rp-limb {
+  background: var(--ink-2); border: 1px solid var(--rule-2); border-radius: var(--radius);
+  padding: 6px; text-align: center;
+}
+.rp-limb-n { display: block; font: 600 10px var(--f-body); color: var(--paper-3); }
+.rp-limb-c { display: block; font-size: 18px; font-weight: 700; color: var(--paper); }
+
+.rp-canvas {
+  width: 100%; height: 150px; display: block;
+  background: var(--ink-0); border: 1px solid var(--rule-2); border-radius: var(--radius);
+}
+
+.rp-controls { display: flex; align-items: center; gap: 6px; margin-top: 10px; flex-wrap: wrap; }
+.rp-btn {
+  background: var(--ink-3); color: var(--paper); border: 1px solid var(--rule-2);
+  border-radius: var(--radius); padding: 9px 12px; cursor: pointer;
+  font: 700 12px var(--f-body); min-height: 42px; min-width: 46px;
+}
+.rp-btn:hover { border-color: var(--paper-3); }
+.rp-play { background: var(--blood); border-color: var(--blood); color: #fff; min-width: 96px; }
+.rp-play.is-playing { background: var(--ink-3); border-color: var(--rule-2); color: var(--paper); }
+.rp-time { margin-left: auto; font-size: 12px; color: var(--paper-2); }
+.rp-rate {
+  background: var(--ink-3); color: var(--paper); border: 1px solid var(--rule-2);
+  border-radius: var(--radius); padding: 8px; min-height: 42px; font-size: 13px;
+}
+/* The scrubber is the main control here, so it gets styled rather than left as
+   the browser's default (which renders bright purple against this palette). */
+.rp-seek {
+  width: 100%; margin: 10px 0 4px; -webkit-appearance: none; appearance: none;
+  background: transparent; cursor: pointer;
+}
+.rp-seek::-webkit-slider-runnable-track {
+  height: 6px; border-radius: 3px;
+  background: var(--ink-3); border: 1px solid var(--rule-2);
+}
+.rp-seek::-moz-range-track {
+  height: 6px; border-radius: 3px;
+  background: var(--ink-3); border: 1px solid var(--rule-2);
+}
+.rp-seek::-webkit-slider-thumb {
+  -webkit-appearance: none; appearance: none;
+  width: 18px; height: 18px; margin-top: -7px; border-radius: 50%;
+  background: var(--blood); border: 2px solid var(--paper);
+}
+.rp-seek::-moz-range-thumb {
+  width: 18px; height: 18px; border-radius: 50%;
+  background: var(--blood); border: 2px solid var(--paper);
+}
+
+.rp-now {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  min-height: 40px; padding: 8px 10px; margin-bottom: 4px;
+  background: var(--ink-2); border-left: 2px solid var(--rule-2); border-radius: var(--radius);
+  font: 600 13px var(--f-body);
+}
+.rp-now-slot { font-weight: 700; }
+.rp-now-type { color: var(--gold); letter-spacing: .08em; }
+.rp-now-g { font-size: 17px; color: var(--paper); }
+
+.rp-list { max-height: 220px; overflow-y: auto; -webkit-overflow-scrolling: touch; }
+.rp-row {
+  display: grid; grid-template-columns: 58px 34px 1fr auto;
+  gap: 8px; align-items: center; padding: 7px 6px; cursor: pointer;
+  border-bottom: 1px dashed rgba(255,255,255,.05);
+}
+.rp-row:hover { background: var(--ink-2); }
+.rp-row.is-cur { background: var(--blood-deep); border-left: 2px solid var(--blood-bright); }
+.rp-row-t { color: var(--paper-3); font-size: 11px; }
+.rp-row-type { font: 600 11px var(--f-body); letter-spacing: .08em; color: var(--paper-2); }
+.rp-row-g { color: var(--paper); font-size: 12px; }
+
+.ico-btn.primary { color: var(--paper); border-color: var(--blood); background: var(--blood-deep); }
+.ico-btn.primary:hover { background: var(--blood); }
+
+@media (max-width: 760px), (pointer: coarse) {
+  .rp-summary { grid-template-columns: repeat(2, 1fr); }
+  .rp-v { font-size: 20px; }
+  .rp-limbs { grid-template-columns: repeat(2, 1fr); }
+  .rp-canvas { height: 170px; }
+  .rp-time { margin-left: 0; width: 100%; order: 5; text-align: center; }
+  .rp-play { flex: 1; }
+  .rp-list { max-height: 34vh; }
+  /* a range slider is a fiddly target on glass — give it real height */
+  .rp-seek { height: 34px; }
+}
+
+/* ════════ RECOVERY ════════ */
+.recovery-row { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px; margin-top: 8px; }
+.recovery-btn {
+  padding: 9px 6px; background: var(--ink-2); color: var(--paper-2);
+  border: 1px solid var(--rule-2); border-radius: var(--radius);
+  font: 700 10.5px var(--f-body); letter-spacing: .02em; cursor: pointer;
+  min-height: 44px;
+}
+.recovery-btn:hover:not(:disabled) { background: var(--ink-3); border-color: var(--gold); color: var(--paper); }
+.recovery-btn:disabled { opacity: .5; cursor: default; }
+/* Base style for .ico-btn. Only scoped variants existed (.lib-row .ico-btn,
+   .nc-actions .ico-btn), so anywhere else the class fell through to the browser's
+   default button chrome — light grey pills on a dark panel. The scoped rules are
+   more specific and still win where they apply. */
+.ico-btn {
+  background: transparent; border: 1px solid var(--rule-2);
+  color: var(--paper-2); padding: 5px 9px; border-radius: var(--radius);
+  font: 600 10px var(--f-body); letter-spacing: .12em; cursor: pointer;
+}
+.ico-btn:hover:not([disabled]) { color: var(--paper); border-color: var(--paper-3); }
+.ico-btn[disabled] { opacity: .4; cursor: not-allowed; }
+.nc-fault {
+  margin: 4px 0 2px; padding: 5px 8px; border-radius: var(--radius);
+  background: var(--blood-deep); border-left: 2px solid var(--blood-bright);
+  color: var(--paper); font: 600 10.5px/1.45 var(--f-body);
+}
+.nc-actions .ico-btn { min-height: 34px; }
+.nr-act { display: block; margin-top: 7px; }
+
+/* ════════ FACTORY RESET ════════ */
+.factory-reset-btn {
+  width: 100%; margin-top: 8px; padding: 9px 12px;
+  background: var(--ink-2); color: var(--blood-bright);
+  border: 1px solid rgba(214,38,49,.4); border-radius: var(--radius);
+  font: 700 11px var(--f-body); letter-spacing: .04em; cursor: pointer;
+}
+.factory-reset-btn:hover { background: var(--blood-deep); color: var(--paper); border-color: var(--blood); }
+.dlg-btn.danger { color: var(--blood-bright); border-color: rgba(214,38,49,.5); }
+.dlg-btn.danger:hover { background: var(--blood-deep); color: var(--paper); border-color: var(--blood); }
+
 .tour-blocker { position: fixed; inset: 0; z-index: 9997; }
 .tour-ring {
   position: fixed; z-index: 9998; border-radius: 6px; pointer-events: none;
@@ -415,6 +590,66 @@ body:not(.is-dev) .logger-block { display: none; }
 .tour-next { background: var(--blood) !important; color: var(--paper) !important; border-color: var(--blood) !important; }
 .tour-skip { color: var(--paper-3) !important; background: transparent !important; border-color: transparent !important; }
 .tour-nav button:hover { border-color: var(--paper-3); }
+
+.tour-progress { height: 3px; background: var(--rule-2); border-radius: 2px; overflow: hidden; margin-bottom: 10px; }
+.tour-progress i { display: block; height: 100%; background: var(--blood-bright); transition: width .25s ease; }
+.tour-step-of { font: 700 9.5px var(--f-display); letter-spacing: .2em; color: var(--gold); margin-bottom: 4px; }
+.tour-swipe-hint { margin-top: 10px; text-align: center; font: 500 10.5px var(--f-body); color: var(--paper-3); }
+
+/* ── tour on phones: a bottom sheet, not a floating card ──
+   A 300 px card positioned next to the target either covers the thing it is
+   describing or gets pushed off a 360 px screen. Pinning it to the bottom keeps
+   it thumb-reachable, keeps the highlight visible above it, and makes the layout
+   impossible to get wrong. tour.js scrolls the target into the strip above. */
+body.tour-open { touch-action: none; }
+/* Runway so the LAST elements on the page can still be scrolled up into the strip
+   above the sheet. Without it the final steps sit at the document bottom, i.e.
+   permanently behind the sheet, however far you scroll. */
+body.tour-mobile { padding-bottom: 60vh; }
+.tour-card.tour-sheet {
+  top: auto; left: 0; right: 0;
+  width: 100%; max-width: 100%;
+  border-radius: 14px 14px 0 0;
+  border-left: 0; border-right: 0; border-bottom: 0;
+  padding: 16px 18px calc(16px + env(safe-area-inset-bottom));
+  max-height: 55vh; overflow-y: auto; -webkit-overflow-scrolling: touch;
+  box-shadow: 0 -14px 40px rgba(0,0,0,.65);
+  animation: tourSheetUp .22s ease-out;
+  bottom: 0;
+  touch-action: pan-y;
+}
+@keyframes tourSheetUp { from { transform: translateY(24px); opacity: 0 } to { transform: none; opacity: 1 } }
+
+/* Flipped to the top for steps whose target sits at the very bottom of the page
+   and therefore cannot be scrolled clear of a bottom sheet. */
+.tour-card.tour-sheet.tour-sheet-top {
+  top: 0; bottom: auto;
+  border-radius: 0 0 14px 14px;
+  border-top: 0; border-bottom: 1px solid var(--rule-2);
+  padding: calc(14px + env(safe-area-inset-top)) 18px 16px;
+  box-shadow: 0 14px 40px rgba(0,0,0,.65);
+  animation: none;
+}
+
+@media (max-width: 760px), (pointer: coarse) {
+  .tour-card.tour-sheet .tour-title { font-size: 18px; }
+  .tour-card.tour-sheet .tour-body  { font-size: 14px; line-height: 1.65; margin-bottom: 16px; }
+  .tour-card.tour-sheet .tour-nav { gap: 8px; }
+  /* 44 px minimum tap targets — the old 6×11 px padding was a miss-magnet */
+  .tour-card.tour-sheet .tour-nav button {
+    min-height: 46px; padding: 12px 14px; font-size: 13px; border-radius: 8px;
+    white-space: nowrap;
+  }
+  /* The progress bar and "ขั้นที่ X จาก Y" already say where you are, so the dots
+     are redundant here — and dropping them is what keeps ข้าม / ย้อน / ถัดไป on
+     one row instead of shoving the primary button off the right edge. */
+  .tour-card.tour-sheet .tour-dots { display: none; }
+  .tour-card.tour-sheet .tour-btns { flex: 1; gap: 8px; }
+  .tour-card.tour-sheet .tour-next { flex: 1; }
+  .tour-card.tour-sheet .tour-skip { padding: 12px 6px; flex: 0 0 auto; }
+  /* the ring must never eat taps meant for the sheet */
+  .tour-ring { transition: none; }
+}
 
 /* ════════ ATHLETE BLOCK ════════ */
 .athlete-input {
@@ -801,6 +1036,8 @@ body:not(.is-dev) .logger-block { display: none; }
 .batt-fill { height: 100%; background: var(--teal-on); transition: width .3s; }
 .batt-fill.low { background: var(--amber); }
 .batt-fill.crit { background: var(--blood); animation: pulseDot 1s infinite; }
+/* no divider fitted — deliberately NOT red: nothing is wrong with the battery */
+.batt-fill.unwired { background: var(--paper-3); }
 
 /* SIGNAL bars */
 .rssi { display: inline-flex; align-items: flex-end; gap: 1px; height: 12px; }
@@ -1156,7 +1393,12 @@ input:focus-visible, select:focus-visible, button:focus-visible {
   border: 1px solid var(--rule-2);
   border-radius: 4px;
   padding: 0;
-  min-width: 360px; max-width: 90vw;
+  /* min-width used to be a flat 360px, which beats max-width in the cascade and
+     pushed the dialog off the side of a 360px phone. Clamp it to the viewport. */
+  min-width: min(360px, 92vw); max-width: 90vw;
+  /* tall dialogs (calibration guide, factory reset, node recovery) must scroll
+     inside themselves rather than run off the bottom of a phone screen */
+  max-height: 88vh; overflow-y: auto; -webkit-overflow-scrolling: touch;
   box-shadow: 0 24px 60px rgba(0,0,0,.6);
 }
 .app-dialog::backdrop { background: rgba(0,0,0,.55); -webkit-backdrop-filter: blur(2px); backdrop-filter: blur(2px); }
@@ -1513,10 +1755,16 @@ body.is-fs .dial-clock { font-size: 56px; }
 /* ════════ FIRST-RUN SETUP WIZARD ════════ */
 .setup-overlay {
   position: fixed; inset: 0; z-index: 9000;
-  display: flex; align-items: center; justify-content: center; padding: 20px;
+  /* flex-start + margin:auto on the card, not align-items:center — a card taller
+     than the screen (small phone, landscape) gets clipped at the TOP and becomes
+     unscrollable when centred. */
+  display: flex; align-items: flex-start; justify-content: center;
+  padding: max(16px, env(safe-area-inset-top)) 16px max(16px, env(safe-area-inset-bottom));
+  overflow-y: auto; -webkit-overflow-scrolling: touch;
   background: rgba(4,4,7,.82); backdrop-filter: blur(3px);
 }
 .setup-card {
+  margin: auto;
   width: 100%; max-width: 440px;
   background: var(--ink-1); border: 1px solid var(--rule-2); border-radius: 6px;
   padding: 26px 24px; text-align: center;
@@ -1571,6 +1819,12 @@ body.is-fs .dial-clock { font-size: 56px; }
   .score-callouts { grid-template-columns: 1fr; }
 
   /* comfortable tap targets */
+  /* the wordmark must yield to the toolbar, not run underneath it — a grid item
+     defaults to min-width:auto and refuses to shrink below its text width */
+  .brand { min-width: 0; overflow: hidden; }
+  .brand-name { font-size: 18px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .topbar-right { flex-shrink: 0; }
+
   .icon-btn { width: 40px; height: 40px; font-size: 16px; }
   .tab { padding: 12px 10px; font-size: 13px; }
   .chip, .seg-btn, .tbtn { min-height: 34px; }
@@ -1589,6 +1843,66 @@ body.is-fs .dial-clock { font-size: 56px; }
   .athlete-meta { grid-template-columns: 1fr; }
   .topbar-meta { font-size: 10px; letter-spacing: .08em; gap: 4px; }
   .live-sensor { padding: 3px 7px; }
-  .brand-name { font-size: 15px; }
+  /* below ~400px the toolbar needs every pixel: keep the logo mark, drop the word */
+  .brand-name { display: none; }
+}
+
+/* ════════ MOBILE DIALOGS + WIZARD (phones and any touch screen) ════════ */
+@media (max-width: 760px), (pointer: coarse) {
+  /* Modals become bottom sheets: reachable with a thumb, can't be half off-screen,
+     and they scroll internally instead of pushing the page around. */
+  .app-dialog {
+    /* position:fixed so left/right resolve against the VIEWPORT. A modal dialog is
+       absolutely positioned by default, where "right:0" resolves against the
+       document canvas — which is itself widened by the dialog, so it ends up a few
+       pixels wider than the screen and the page gains a horizontal scrollbar. */
+    position: fixed;
+    top: auto; bottom: 0; left: 0; right: 0;
+    width: auto; max-width: none; min-width: 0;
+    margin: 0;
+    box-sizing: border-box;
+    max-height: 90vh;
+    border-radius: 14px 14px 0 0;
+    border-left: 0; border-right: 0; border-bottom: 0;
+  }
+  .dlg-body { padding: 18px 16px calc(18px + env(safe-area-inset-bottom)); }
+  .dlg-title { font-size: 16px; }
+  .dlg-x { min-width: 44px; min-height: 44px; font-size: 22px; }
+  /* label-above-field beats a 120px label column on a narrow screen */
+  .dlg-row { grid-template-columns: 1fr; gap: 6px; }
+  .dlg-row input, .dlg-row select { min-height: 44px; font-size: 16px; }
+  /* actions stack full-width, primary on top where the thumb lands first */
+  .dlg-actions { flex-direction: column-reverse; align-items: stretch; gap: 8px; }
+  .dlg-actions .dlg-btn, .dlg-actions a.dlg-btn {
+    width: 100%; min-height: 48px; display: flex; align-items: center; justify-content: center;
+  }
+  .detail-grid { grid-template-columns: 1fr 1fr; }
+  .cmp-table { font-size: 12px; }
+  .cal-guide-img { max-height: 34vh; }
+
+  /* first-run wizard: one action per row, primary first */
+  .setup-actions { flex-direction: column-reverse; align-items: stretch; }
+  .setup-btn { width: 100%; min-height: 50px; font-size: 13px; }
+  .setup-title { font-size: 21px; }
+  .setup-lead { font-size: 13.5px; }
+  .setup-steps { font-size: 13px; line-height: 1.75; }
+  .setup-shake-emoji { font-size: 44px; }
+  .setup-detect-txt { font-size: 12.5px; }
+
+  /* node cards: real tap targets, actions wrap instead of overflowing */
+  .nc-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+  .nc-actions .ico-btn { min-height: 42px; padding: 0 12px; flex: 1 1 auto; }
+  .nc-slot-sel { min-height: 44px; font-size: 16px; }
+
+  /* "ค้นหาใหม่" + "คาลิเบรตทั้งหมด" side by side are 5px wider than a 375px
+     screen, which gave the whole page a horizontal scroll. Stack the header and
+     let the two buttons share a full-width row instead. */
+  .sensors-head { flex-wrap: wrap; }
+  .sensors-head-btns { width: 100%; }
+  .sensors-head-btns .cal-all-btn { flex: 1 1 0; min-width: 0; min-height: 42px; }
+  .recovery-row { grid-template-columns: 1fr; }
+  .recovery-btn { font-size: 13px; min-height: 48px; }
+  .factory-reset-btn { min-height: 48px; font-size: 12.5px; }
+  .nr-act { width: 100%; min-height: 44px; }
 }
 
