@@ -21,7 +21,7 @@
 //      โดยเฉพาะ charge-detect: ขาลอยอาจอ่าน HIGH เอง → node หลับทันที
 //      อาการ "เชื่อมแปบเดียวแล้วหลุด" = ขา GPIO5 ลอยแล้วเข้าใจว่ากำลังชาร์จ
 // ─────────────────────────────────────────────────────────────
-#define ENABLE_CHARGE_DETECT  0   // 1 = เปิดตรวจชาร์จ (GPIO5 ต่อ divider จาก IN+ แล้ว) · 0 = ปิด (dev/ยังไม่ต่อ GPIO5)
+#define ENABLE_CHARGE_DETECT  0   // 0 = โหมด A (ตื่นตลอด · dashboard โชว์ชาร์จจากเทรนด์แรงดัน · แบตพึ่ง protection IC ของ TP4056) · 1 = pause/sleep ตอนชาร์จ (GPIO5 ต่อแล้วทุกบอร์ด แต่ต้อง validate ให้อ่านนิ่งก่อน)
 #define ENABLE_BATTERY        1   // 1 = อ่านแบตจริงจาก GPIO4 · 0 = ส่ง 100% ตายตัว
 
 // ⚠ แยกออกจาก ENABLE_BATTERY โดยตั้งใจ!
@@ -59,7 +59,7 @@
 //   (ADC2 อ่านไม่ได้เลยเมื่อเปิด WiFi — ขา GPIO5 จึงใช้ไม่ได้)
 //   ตัด GPIO2 ออกเพราะเป็นขา LED · GPIO8/9 เป็น I2C ของ BMI160
 //   เรียง GPIO4 ไว้แรกเพื่อให้บอร์ดที่ต่อไว้เดิมทำงานเหมือนเดิม
-#define BAT_PIN_CANDIDATES  { 4, 3, 1, 0 }
+#define BAT_PIN_CANDIDATES  { 4, 1, 0 }   // ⚠ ตัด GPIO3 ออก — สงวนไว้เป็นขา motion INT (MOTION_INT_PIN)
 
 #define BAT_RESCAN_MS       30000   // ยังหาไม่เจอ → ไล่หาใหม่ทุก 30 วิ (เผื่อเพิ่งเสียบแบต)
 
@@ -94,6 +94,32 @@ static uint32_t g_batScanMs    = 0;
 #define BMI160_REG_ACC_RANG 0x41
 #define BMI160_REG_GYR_RANG 0x43
 #define BMI160_REG_DATA 0x0C // GYR_X_L
+
+// ── Wake-on-motion (Phase 1) ────────────────────────────────
+// BMX160 มี any-motion interrupt ในตัว → ใช้ปลุก ESP32 ตอนหลับ
+//   step 1a (MOTION_DEEP_SLEEP=0): config + อ่าน INT_STATUS ทาง I2C มาพิมพ์
+//        ยืนยันว่าเซนเซอร์จับการเคลื่อนไหวได้ — ยังไม่ต้องต่อสาย INT1 · ไม่หลับ (ปลอดภัย)
+//   step 1b (MOTION_DEEP_SLEEP=1): ต่อสาย INT1 → GPIO3 แล้วเปิด deep sleep + wake
+#define ENABLE_MOTION_WAKE  1      // 1 = เปิด any-motion detect
+#define MOTION_DEEP_SLEEP   1      // 0 = แค่ตรวจ+พิมพ์ (เช็ก INT1) · 1 = หลับจริง (production)
+#define MOTION_INT_PIN      3      // GPIO3 (wake-capable) รับ INT1 จาก BMX160
+#define MOTION_IDLE_MS      300000 // นิ่งเกินเท่านี้ (ms) → หลับ · 300000 = 5 นาที (production · กันหลับกลางยก/พักคอมโบ)
+#define MOTION_THRESH       0x08   // any-motion threshold · ±16g: 1 LSB≈31mg → 0x08≈250mg (ปรับได้)
+#define MOTION_DUR          0x00   // จำนวน sample เกิน threshold ก่อนยิง (bits1:0 · 0=1 sample ไวสุด)
+#define MOTION_VERBOSE      0      // 1 = พิมพ์ GPIO3/I2C ทุกวินาที (สำหรับเช็ก INT1 โหนดใหม่) · production=0
+
+// BMX160/BMI160 interrupt registers (สำหรับ any-motion)
+#define BMX_REG_INT_STATUS0  0x1C  // bit2 = any-motion
+#define BMX_REG_INT_EN0      0x50  // bit0-2 = anymotion x/y/z enable
+#define BMX_REG_INT_OUT_CTRL 0x53  // INT1 output/level/mode
+#define BMX_REG_INT_LATCH    0x54  // latch mode
+#define BMX_REG_INT_MAP0     0x55  // bit2 = map anymotion → INT1
+#define BMX_REG_INT_MAP2     0x57  // bit2 = map anymotion → INT2
+#define BMX_REG_INT_MOTION0  0x5F  // anymotion duration (bits1:0)
+#define BMX_REG_INT_MOTION1  0x60  // anymotion threshold (8-bit)
+
+uint32_t lastMotionMs = 0;   // เวลาตรวจพบการเคลื่อนไหวล่าสุด (feeds idle-sleep ตอน step 1b)
+volatile bool g_intSeenHigh = false;  // fast-poll: GPIO3(INT) เคยขึ้น HIGH ในรอบล่าสุดไหม
 
 // --- State ---
 // ใช้ Broadcast MAC (FF:FF:FF:FF:FF:FF) เพื่อแก้ปัญหา MAC ของฝั่ง AP ไม่ตรงกับ STA
@@ -194,11 +220,23 @@ uint8_t readBmi160(uint8_t reg) {
 }
 
 bool initBMI160() {
-  uint8_t chipId = readBmi160(BMI160_REG_CHIPID);
-  if (chipId != 0xD1) {
-    Serial.printf("BMI160 not found! CHIP_ID: 0x%02X\n", chipId);
+  // retry อ่าน CHIP_ID กันสัมผัส/บัสยังไม่นิ่งตอน boot
+  uint8_t chipId = 0;
+  for (int r = 0; r < 8; r++) {
+    chipId = readBmi160(BMI160_REG_CHIPID);
+    if (chipId == 0xD1 || chipId == 0xD8) break;   // 0xD1=BMI160 · 0xD8=BMX160
+    delay(25);
+  }
+  // โมดูลที่ใช้จริงเป็น BMX160 (id 0xD8) — register accel/gyro เหมือน BMI160 ทุกอย่าง
+  if (chipId != 0xD1 && chipId != 0xD8) {
+    Serial.printf("IMU not found! CHIP_ID: 0x%02X (want 0xD1/0xD8)\n", chipId);
     return false;
   }
+  Serial.printf("IMU OK: CHIP_ID=0x%02X (%s)\n", chipId, chipId == 0xD8 ? "BMX160" : "BMI160");
+
+  // Soft reset ก่อน แล้วรอให้ชิปพร้อม (เคลียร์สถานะค้าง)
+  writeBmi160(BMI160_REG_PMU_CMD, 0xB6);
+  delay(100);
 
   // ⚠ อย่าใส่ softreset (PMU_CMD 0xB6) ตรงนี้ — ลองแล้ววัดผลจริงบนโหนดตัวที่ 4:
   //   ไม่มี softreset = พลาดครั้งเดียวตอนบูตแรกแล้วทำงานปกติยาว
@@ -231,6 +269,44 @@ bool initBMI160() {
                   pmu, (int)accOk, (int)gyrOk);
   }
   return true;
+}
+
+// ── ตั้งค่า BMX160 any-motion interrupt ──
+// เรียกหลัง initBMI160 (ตอน timer 400Hz ยังไม่เริ่ม = ไม่มีใครแย่ง I2C)
+void configureAnyMotion() {
+  writeBmi160(BMX_REG_INT_MOTION1, MOTION_THRESH);       // threshold
+  writeBmi160(BMX_REG_INT_MOTION0, MOTION_DUR & 0x03);   // duration
+  writeBmi160(BMX_REG_INT_EN0,     0x07);                // เปิด anymotion x/y/z
+  // map anymotion → ทั้ง INT1 และ INT2 (กันโมดูลสลับ label INT1/INT2)
+  writeBmi160(BMX_REG_INT_MAP0,    0x04);                // INT1
+  writeBmi160(BMX_REG_INT_MAP2,    0x04);                // INT2
+  // เปิด output ทั้ง INT1(0x0A) + INT2(0xA0) · push-pull active-high
+  writeBmi160(BMX_REG_INT_OUT_CTRL, 0xAA);
+  // latch ชั่วคราว ~1.28s (0x0D) เพื่อให้ INT_STATUS/pin ค้างพอให้ loop (poll ทุก 1s) อ่านทัน
+  writeBmi160(BMX_REG_INT_LATCH,   0x0D);
+  // readback ยืนยัน config ติดจริง (ควรได้ OUT_CTRL=0xAA MAP0=0x04 MAP2=0x04)
+  uint8_t oc = readBmi160(BMX_REG_INT_OUT_CTRL);
+  uint8_t m0 = readBmi160(BMX_REG_INT_MAP0);
+  uint8_t m2 = readBmi160(BMX_REG_INT_MAP2);
+  uint8_t en = readBmi160(BMX_REG_INT_EN0);
+  uint8_t t1 = readBmi160(BMX_REG_INT_MOTION1);
+  uint8_t pmu = readBmi160(0x03);  // PMU_STATUS: accel/gyro โหมด
+  Serial.printf("[MOTION] readback EN0=0x%02X(ควร07) THR=0x%02X(ควร08) OUT_CTRL=0x%02X MAP0=0x%02X MAP2=0x%02X PMU=0x%02X\n",
+                en, t1, oc, m0, m2, pmu);
+}
+
+// ── เข้า deep sleep แบบ wake-on-motion ──
+// นิ่งเกิน MOTION_IDLE_MS → suspend gyro (ตัดตัวกินหลัก) → deep sleep · ปลุกด้วย GPIO3 HIGH (INT ตอนขยับ)
+void enterMotionSleep() {
+  Serial.println("[MOTION] 💤 นิ่งเกิน timeout → deep sleep (ขยับเพื่อปลุก)");
+  Serial.flush();
+  esp_timer_stop(sampleTimer);              // หยุด 400Hz timer ก่อนแตะ I2C
+  writeBmi160(BMI160_REG_PMU_CMD, 0x14);    // gyro suspend (~900µA → µA) · anymotion เป็น accel ไม่กระทบ
+  delay(50);
+  // accel ยัง normal ไว้ (การันตี anymotion) · anymotion INT config ยังอยู่จาก configureAnyMotion
+  digitalWrite(LED_PIN, LOW);
+  esp_deep_sleep_enable_gpio_wakeup(1ULL << MOTION_INT_PIN, ESP_GPIO_WAKEUP_GPIO_HIGH);
+  esp_deep_sleep_start();                    // ตื่นเมื่อ GPIO3=HIGH (ขยับ) → boot ใหม่ผ่าน setup()
 }
 
 // --- ESP-NOW Callbacks ---
@@ -721,6 +797,22 @@ void setup() {
     hasSensor = true;
   }
 
+#if ENABLE_MOTION_WAKE
+  pinMode(MOTION_INT_PIN, INPUT);        // รับ INT1
+  if (hasSensor) configureAnyMotion();
+  // วินิจฉัยขา GPIO3: สาย INT ถึงจริงไหม (ตอนบูตยังนิ่ง INT ควร idle-low)
+  pinMode(MOTION_INT_PIN, INPUT_PULLUP);   delayMicroseconds(400);
+  bool _pu = digitalRead(MOTION_INT_PIN);
+  pinMode(MOTION_INT_PIN, INPUT_PULLDOWN); delayMicroseconds(400);
+  bool _pd = digitalRead(MOTION_INT_PIN);
+  pinMode(MOTION_INT_PIN, INPUT);
+  Serial.printf("[MOTION] GPIO3 probe: pullup=%d pulldown=%d → %s\n", _pu, _pd,
+                (_pu && !_pd) ? "ลอย (สายไม่ถึงขา INT!)"
+              : (!_pu && !_pd) ? "ถูกดึงต่ำ (สายต่อ INT idle-low OK)"
+              : "ถูกดันสูง");
+  lastMotionMs = millis();
+#endif
+
   // Setup WiFi & ESP-NOW
   WiFi.mode(WIFI_STA);
   WiFi.disconnect();
@@ -872,8 +964,8 @@ void loop() {
     if (now - lastBattLogMs >= BATT_LOG_MS) {
       lastBattLogMs = now;
       if (g_battWired) Serial.printf("[BATT] %.3f V  ->  %u%%\n", g_battEma, st.batteryPct);
-      else             Serial.printf("[BATT] อ่านไม่ได้ — ไม่พบวงจรวัดแบตที่ขา ADC ใดเลย (ลอง GPIO %d,%d,%d,%d)\n",
-                                     BAT_PINS[0], BAT_PINS[1], BAT_PINS[2], BAT_PINS[3]);
+      else             Serial.printf("[BATT] อ่านไม่ได้ — ไม่พบวงจรวัดแบตที่ขา ADC ใดเลย (ลอง GPIO %d,%d,%d)\n",
+                                     BAT_PINS[0], BAT_PINS[1], BAT_PINS[2]);
     }
 
   #if ENABLE_LOW_BATT_CUTOFF
@@ -893,9 +985,33 @@ void loop() {
                   digitalRead(CHG_SENSE_PIN) ? "HIGH (เสียบอยู่)" : "LOW (ถอด/ลอย)");
 #endif
 
+#if ENABLE_MOTION_WAKE
+    // ติดตามการเคลื่อนไหว (I2C any-motion + fast-poll GPIO3) → นิ่งเกิน timeout = หลับ
+    {
+      bool i2cMotion = hasSensor && (readBmi160(BMX_REG_INT_STATUS0) & 0x04);
+      if (i2cMotion || g_intSeenHigh) lastMotionMs = now;
+#if MOTION_VERBOSE
+      Serial.printf("[MOTION] GPIO3 high-in-1s=%d (now=%s)  I2C=%s | az=%d ax=%d ay=%d\n",
+                    g_intSeenHigh ? 1 : 0,
+                    (digitalRead(MOTION_INT_PIN) == HIGH) ? "HIGH" : "low",
+                    i2cMotion ? "motion" : "-",
+                    txPacket.samples[0].az, txPacket.samples[0].ax, txPacket.samples[0].ay);
+#endif
+      g_intSeenHigh = false;
+#if MOTION_DEEP_SLEEP
+      if (hasSensor && (uint32_t)msSince(now, lastMotionMs) > MOTION_IDLE_MS)
+        enterMotionSleep();
+#endif
+    }
+#endif
+
     // ไฟหัวใจ 1 ครั้ง/วินาที — เว้นไว้ตอนกำลังกะพริบระบุตัว ไม่งั้นจะไปแย่งจังหวะกัน
     if (!identifying) digitalWrite(LED_PIN, !digitalRead(LED_PIN));
   }
+
+#if ENABLE_MOTION_WAKE
+  if (digitalRead(MOTION_INT_PIN) == HIGH) g_intSeenHigh = true;   // fast-poll จับ pulse INT (~ทุก 1ms)
+#endif
 
   delay(1);   // เร็วพอ service IMU buffer (50 packet/s) · ปล่อย CPU ให้ WiFi/idle ทำงาน
 }

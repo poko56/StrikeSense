@@ -30,6 +30,7 @@
 #include <WiFi.h>
 #include <esp_now.h>
 #include <esp_wifi.h>
+#include "driver/rtc_io.h" // ปุ่ม wake-from-deep-sleep (Phase 2)
 #include <time.h>
 
 // ============================================================
@@ -1125,6 +1126,8 @@ void begin() {
   setColor(40, 40, 40);
 }
 
+void off() { setColor(0, 0, 0); } // ดับ NeoPixel ก่อน deep sleep (ไม่งั้น pixel ล็อกสีค้างเอง)
+
 void setState(State s) {
   if (g_state == s)
     return;
@@ -1966,6 +1969,49 @@ static void logStats() {
       (unsigned long)SdLogger::rowsWritten(), (unsigned long)ESP.getFreeHeap());
 }
 
+// ============================================================
+//  POWER — button wake/sleep (Phase 2)
+// ============================================================
+#define ENABLE_PWR_BUTTON  1        // 1 = เปิดปุ่ม sleep/wake
+#define PWR_BTN_PIN        4        // ปุ่ม momentary → GND (INPUT_PULLUP · idle HIGH, กด LOW)
+#define PWR_LONGPRESS_MS   2000     // กดค้างเท่านี้ (ms) → sleep
+#define PWR_IDLE_SLEEP_MS  600000   // ไม่มี client+session+โหนดสด นานเท่านี้ → sleep (10 นาที)
+
+static uint32_t g_btnDownMs    = 0; // เวลาเริ่มกดปุ่ม (0 = ไม่กด)
+static uint32_t g_lastActiveMs = 0; // ครั้งล่าสุดที่ระบบ "ไม่ idle"
+
+// เข้า deep sleep · ปิด SD (software power-down) · ตื่นด้วยปุ่ม GPIO4=LOW
+static void enterMainSleep(const char *reason) {
+  Serial.printf("[PWR] %s → deep sleep (กดปุ่มเพื่อปลุก)\n", reason);
+  Serial.flush();
+  // รอปล่อยปุ่มก่อน — ไม่งั้น wake-on-LOW จะปลุกกลับทันทีที่หลับ
+  while (digitalRead(PWR_BTN_PIN) == LOW) delay(10);
+  delay(50);                                    // debounce กันเด้งตอนปล่อย
+  StatusLed::off();                             // ดับไฟ NeoPixel (ไม่งั้นค้างสีตอนหลับ)
+  WiFi.mode(WIFI_OFF);                          // ปิด AP ให้ SSID หายไว (deep sleep ปิดวิทยุอยู่แล้ว)
+  SD.end();                                     // ปิด SD (ปลด SPI · ลดกระแส idle การ์ด)
+  rtc_gpio_pullup_en((gpio_num_t)PWR_BTN_PIN);   // ให้ขาปุ่มนิ่ง HIGH ตอนหลับ (กันปลุกมั่ว)
+  rtc_gpio_pulldown_dis((gpio_num_t)PWR_BTN_PIN);
+  esp_sleep_enable_ext0_wakeup((gpio_num_t)PWR_BTN_PIN, 0); // ตื่นเมื่อ GPIO4=LOW (กดปุ่ม)
+  esp_deep_sleep_start();
+}
+
+// เรียกทุก loop: กดค้าง→sleep · idle นาน→sleep
+static void powerButtonTask() {
+  const uint32_t now = millis();
+  if (digitalRead(PWR_BTN_PIN) == LOW) {         // ปุ่มถูกกด (active-low)
+    if (g_btnDownMs == 0) g_btnDownMs = now;
+    else if (now - g_btnDownMs >= PWR_LONGPRESS_MS) enterMainSleep("กดค้าง");
+  } else {
+    g_btnDownMs = 0;
+  }
+  const bool active = WebServerApp::connectedClients() > 0 ||
+                      Session::isActive() || Session::liveNodeCount(3000) > 0;
+  if (active) g_lastActiveMs = now;
+  else if (g_lastActiveMs && now - g_lastActiveMs >= PWR_IDLE_SLEEP_MS)
+    enterMainSleep("idle นาน");
+}
+
 void setup() {
   Serial.begin(115200);
   // Never let a log line block the loop. On USB-CDC, writes stall waiting for a
@@ -1984,6 +2030,13 @@ void setup() {
 
   StatusLed::begin();
   Session::begin();
+
+#if ENABLE_PWR_BUTTON
+  pinMode(PWR_BTN_PIN, INPUT_PULLUP);   // ปุ่ม sleep/wake → GND
+  g_lastActiveMs = millis();
+  if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_EXT0)
+    Serial.println("[PWR] ตื่นจากปุ่ม (button wake)");
+#endif
 
   if (!SdLogger::begin()) {
     Serial.println("[WARN] SD card unavailable - sessions will not be logged");
@@ -2018,6 +2071,10 @@ void setup() {
 void loop() {
   ImuFrame frame;
   int drained = 0;
+
+#if ENABLE_PWR_BUTTON
+  powerButtonTask();   // ปุ่ม: กดค้าง→sleep · idle นาน→sleep · กดตอนหลับ→ตื่น (ext0)
+#endif
 
   // While a page is being delivered, give the document EVERYTHING.
   //
