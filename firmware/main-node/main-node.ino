@@ -28,9 +28,9 @@
 #include <SD.h>
 #include <SPI.h>
 #include <WiFi.h>
+#include <DNSServer.h> // captive portal — จับ DNS ทุกโดเมน → AP IP
 #include <esp_now.h>
 #include <esp_wifi.h>
-#include "driver/rtc_io.h" // ปุ่ม wake-from-deep-sleep (Phase 2)
 #include <time.h>
 
 // ============================================================
@@ -777,6 +777,22 @@ bool nextFrame(ImuFrame &out, TickType_t waitTicks = 0) {
   return xQueueReceive(g_queue, &out, waitTicks) == pdTRUE;
 }
 
+// เปิด/ปิดการรับ ESP-NOW · ปิดตอนไม่มีคนดู → ปล่อย CPU/คิวให้หน้าเว็บโหลด
+// (Strike Node ยังส่งอยู่ แต่ Main ไม่ประมวลผล = ลดภาระ · เปิดคืนเมื่อมีคนต่อ dashboard/record)
+static bool g_rxEnabled = true;
+void setEnabled(bool on) {
+  if (on == g_rxEnabled)
+    return;
+  g_rxEnabled = on;
+  if (on) {
+    esp_now_register_recv_cb(onRecv);
+  } else {
+    esp_now_unregister_recv_cb();
+    xQueueReset(g_queue); // ทิ้งเฟรมค้างในคิว
+  }
+}
+bool isEnabled() { return g_rxEnabled; }
+
 uint32_t packetsReceived() { return g_received; }
 uint32_t packetsDropped() { return g_dropped; }
 
@@ -1126,8 +1142,6 @@ void begin() {
   setColor(40, 40, 40);
 }
 
-void off() { setColor(0, 0, 0); } // ดับ NeoPixel ก่อน deep sleep (ไม่งั้น pixel ล็อกสีค้างเอง)
-
 void setState(State s) {
   if (g_state == s)
     return;
@@ -1172,6 +1186,7 @@ void tick() {
 namespace WebServerApp {
 static AsyncWebServer g_http(HTTP_PORT);
 static AsyncWebSocket g_ws(WS_PATH);
+static DNSServer g_dns; // captive portal DNS
 static uint32_t g_wsDropped =
     0; // frames dropped by backpressure (see broadcastImuFrame)
 
@@ -1796,8 +1811,10 @@ static void registerRoutes() {
         }
       });
 
+  // captive portal: request แปลกปลอม (probe เช็กเน็ตของมือถือ) → redirect ไป dashboard
+  // → มือถือเด้ง "Sign in to StrikeSense" เปิดหน้าให้เอง แทนที่จะรอ/ไม่ยอมต่อ
   g_http.onNotFound([](AsyncWebServerRequest *req) {
-    req->send(404, "text/plain", "Not found");
+    req->redirect("http://192.168.4.1/");
   });
 }
 
@@ -1809,6 +1826,11 @@ bool begin() {
   IPAddress ip = WiFi.softAPIP();
   Serial.printf("[WIFI] AP '%s' up at %s (channel %d)\n", AP_SSID,
                 ip.toString().c_str(), AP_CHANNEL);
+
+  // captive portal: จับ DNS ทุกโดเมน → AP IP · มือถือเช็กเน็ตจะโดน redirect เด้ง dashboard
+  g_dns.setErrorReplyCode(DNSReplyCode::NoError);
+  g_dns.start(53, "*", ip);
+  Serial.println("[DNS] captive portal เปิด (ทุกโดเมน → dashboard)");
 
   g_ws.onEvent(onWsEvent);
   g_ws.handleHandshake([](AsyncWebServerRequest *req) -> bool {
@@ -1841,6 +1863,8 @@ static constexpr size_t WS_FRAME_MAX =
     16 + IMU_SAMPLES_PER_PACKET * sizeof(ImuSample);
 static constexpr size_t WS_BATCH_CAP = WS_FRAME_MAX * 8;
 static constexpr uint32_t WS_BATCH_MS = 12; // under one 60 fps UI frame
+// ส่งเข้า WS แค่ 1 ใน N เฟรม (ลดโหลด SoftAP กับ 4 โหนด · live ไม่ต้อง 400Hz เต็ม · SD ยังเต็ม)
+#define WS_DOWNSAMPLE 4
 static uint8_t g_batch[WS_BATCH_CAP];
 static size_t g_batchLen = 0;
 static uint32_t g_batchOpenMs = 0;
@@ -1880,6 +1904,13 @@ void broadcastImuFrame(const ImuFrame &f) {
     g_batchLen = 0;
     return;
   }
+#if WS_DOWNSAMPLE > 1
+  // downsample live stream: ส่งเข้า WS แค่ 1 ใน WS_DOWNSAMPLE เฟรม
+  // (ลดโหลด SoftAP → live ลื่น + reconnect เร็ว · SD ยังบันทึกครบทุกเฟรม)
+  static uint32_t s_wsSkip = 0;
+  if ((s_wsSkip++ % WS_DOWNSAMPLE) != 0)
+    return;
+#endif
   const size_t frameLen = 16 + f.sampleCount * sizeof(ImuSample);
   if (frameLen > WS_FRAME_MAX)
     return;
@@ -1902,6 +1933,7 @@ void broadcastImuFrame(const ImuFrame &f) {
 
 void loop() {
   const uint32_t now = millis();
+  g_dns.processNextRequest(); // captive portal DNS
 
   if (g_batchLen && (now - g_batchOpenMs) >= WS_BATCH_MS)
     flushImuBatch();
@@ -1969,49 +2001,6 @@ static void logStats() {
       (unsigned long)SdLogger::rowsWritten(), (unsigned long)ESP.getFreeHeap());
 }
 
-// ============================================================
-//  POWER — button wake/sleep (Phase 2)
-// ============================================================
-#define ENABLE_PWR_BUTTON  1        // 1 = เปิดปุ่ม sleep/wake
-#define PWR_BTN_PIN        4        // ปุ่ม momentary → GND (INPUT_PULLUP · idle HIGH, กด LOW)
-#define PWR_LONGPRESS_MS   2000     // กดค้างเท่านี้ (ms) → sleep
-#define PWR_IDLE_SLEEP_MS  600000   // ไม่มี client+session+โหนดสด นานเท่านี้ → sleep (10 นาที)
-
-static uint32_t g_btnDownMs    = 0; // เวลาเริ่มกดปุ่ม (0 = ไม่กด)
-static uint32_t g_lastActiveMs = 0; // ครั้งล่าสุดที่ระบบ "ไม่ idle"
-
-// เข้า deep sleep · ปิด SD (software power-down) · ตื่นด้วยปุ่ม GPIO4=LOW
-static void enterMainSleep(const char *reason) {
-  Serial.printf("[PWR] %s → deep sleep (กดปุ่มเพื่อปลุก)\n", reason);
-  Serial.flush();
-  // รอปล่อยปุ่มก่อน — ไม่งั้น wake-on-LOW จะปลุกกลับทันทีที่หลับ
-  while (digitalRead(PWR_BTN_PIN) == LOW) delay(10);
-  delay(50);                                    // debounce กันเด้งตอนปล่อย
-  StatusLed::off();                             // ดับไฟ NeoPixel (ไม่งั้นค้างสีตอนหลับ)
-  WiFi.mode(WIFI_OFF);                          // ปิด AP ให้ SSID หายไว (deep sleep ปิดวิทยุอยู่แล้ว)
-  SD.end();                                     // ปิด SD (ปลด SPI · ลดกระแส idle การ์ด)
-  rtc_gpio_pullup_en((gpio_num_t)PWR_BTN_PIN);   // ให้ขาปุ่มนิ่ง HIGH ตอนหลับ (กันปลุกมั่ว)
-  rtc_gpio_pulldown_dis((gpio_num_t)PWR_BTN_PIN);
-  esp_sleep_enable_ext0_wakeup((gpio_num_t)PWR_BTN_PIN, 0); // ตื่นเมื่อ GPIO4=LOW (กดปุ่ม)
-  esp_deep_sleep_start();
-}
-
-// เรียกทุก loop: กดค้าง→sleep · idle นาน→sleep
-static void powerButtonTask() {
-  const uint32_t now = millis();
-  if (digitalRead(PWR_BTN_PIN) == LOW) {         // ปุ่มถูกกด (active-low)
-    if (g_btnDownMs == 0) g_btnDownMs = now;
-    else if (now - g_btnDownMs >= PWR_LONGPRESS_MS) enterMainSleep("กดค้าง");
-  } else {
-    g_btnDownMs = 0;
-  }
-  const bool active = WebServerApp::connectedClients() > 0 ||
-                      Session::isActive() || Session::liveNodeCount(3000) > 0;
-  if (active) g_lastActiveMs = now;
-  else if (g_lastActiveMs && now - g_lastActiveMs >= PWR_IDLE_SLEEP_MS)
-    enterMainSleep("idle นาน");
-}
-
 void setup() {
   Serial.begin(115200);
   // Never let a log line block the loop. On USB-CDC, writes stall waiting for a
@@ -2030,13 +2019,6 @@ void setup() {
 
   StatusLed::begin();
   Session::begin();
-
-#if ENABLE_PWR_BUTTON
-  pinMode(PWR_BTN_PIN, INPUT_PULLUP);   // ปุ่ม sleep/wake → GND
-  g_lastActiveMs = millis();
-  if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_EXT0)
-    Serial.println("[PWR] ตื่นจากปุ่ม (button wake)");
-#endif
 
   if (!SdLogger::begin()) {
     Serial.println("[WARN] SD card unavailable - sessions will not be logged");
@@ -2071,10 +2053,6 @@ void setup() {
 void loop() {
   ImuFrame frame;
   int drained = 0;
-
-#if ENABLE_PWR_BUTTON
-  powerButtonTask();   // ปุ่ม: กดค้าง→sleep · idle นาน→sleep · กดตอนหลับ→ตื่น (ext0)
-#endif
 
   // While a page is being delivered, give the document EVERYTHING.
   //
