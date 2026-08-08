@@ -43,6 +43,15 @@
 #define HTTP_PORT 80
 #define WS_PATH "/ws"
 
+// Upper bound on live-stream clients. Only a backstop, NOT the zombie defence —
+// see WebServerApp::loop(). Keep it well above the real client count: a phone
+// routinely holds two pages at once (the captive-portal mini browser plus the
+// real one), and each reconnect briefly adds another. A cap of 2 was tried and
+// became a reconnect engine of its own: 2 legitimate pages + 1 reconnect tripped
+// the cap every time, so cleanupClients() closed a *live* page, which reconnected,
+// which tripped it again — 154 connections in two minutes.
+#define MAX_WS_CLIENTS 6
+
 #define SD_CS_PIN 10
 #define SD_MOSI_PIN 11
 #define SD_SCK_PIN 12
@@ -1208,15 +1217,11 @@ static constexpr uint32_t STREAM_QUIET_MS = 4000;
 static volatile uint32_t g_streamQuietUntilMs = 0;
 static uint32_t g_quietDrops = 0;
 
-// While a device is mid page-load, refuse *new* WebSocket upgrades from that
-// same device. The page being replaced retries its socket on a 400 ms backoff,
-// and every one of those handshakes competes with the document it is waiting
-// for. Short window: the incoming page can only ask for its socket after the
-// document has fully arrived, by which point this has already been cleared.
-static constexpr uint32_t LOAD_GUARD_MS = 2000;
-static volatile uint32_t g_loadingIp = 0;
-static volatile uint32_t g_loadingUntilMs = 0;
-static uint32_t g_wsRejected = 0;
+// How long every client may reject every batch before the whole set is dropped
+// as wedged. Well above any normal congestion blip on a SoftAP.
+static constexpr uint32_t WS_WEDGED_MS = 8000;
+static uint32_t g_allDiscardSinceMs = 0;
+
 
 // Tracks a document response from start to delivery. If onDisconnect never
 // fires, the response stalled — the exact failure the user reports as a page
@@ -1250,26 +1255,37 @@ static bool parseMac(const char *s, uint8_t *out) {
 static void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client,
                       AwsEventType type, void *, uint8_t *, size_t) {
   if (type == WS_EVT_CONNECT) {
-    // A browser refresh does not reliably send a close frame, so the old
-    // socket lingers here as a zombie: it still counts toward the client
-    // limit and still gets frames queued at it. The refreshed page then
-    // could not get a working stream. Since one phone = one IP on the
-    // SoftAP, any *other* client on this IP is by definition the socket
-    // this same device just abandoned — close it now.
+    // NO same-IP eviction here — it created a self-sustaining reconnect loop.
+    //
+    // The idea was: one phone = one IP on the SoftAP, so any other socket from
+    // this IP must be one the device abandoned on refresh. But every ordinary
+    // reconnect has a moment where both sockets exist, because closing is a round
+    // trip. Evicting there meant:
+    //     client dials B  ->  firmware closes A  ->  A's onclose reaches the page
+    //     ->  page reconnects  ->  C  ->  firmware closes B  ->  ...
+    // Measured on the rig: 269 connections in 109 s, every one logging
+    // "closed 1 stale", every close arriving at the browser as code 1005. The
+    // connection indicator flickered the whole time.
+    //
+    // Nothing is needed in its place: the page closes its own socket on pagehide,
+    // and AsyncWebSocket reaps dead clients through its own disconnect path.
     const IPAddress ip = client->remoteIP();
-    uint32_t killed = 0;
-    for (auto &c : server->getClients()) {
-      if (c.id() != client->id() && c.remoteIP() == ip) {
-        c.close();
-        killed++;
-      }
-    }
-    // Ping idle peers so a phone that walked out of range is detected in
-    // seconds instead of sitting in the list until TCP finally times out.
-    client->keepAlivePeriod(5);
-    DLOG("WS", "เชื่อมต่อ #%u จาก %s (ปิดตัวเก่า %lu · รวม %u)", client->id(),
-         ip.toString().c_str(), (unsigned long)killed,
-         (unsigned)server->count());
+    // Server-side keep-alive ping is OFF, deliberately.
+    //
+    // It used to be 5 s. The library only pings while a client's send queue is
+    // empty — which is precisely the window this firmware creates on purpose: the
+    // stream is muted for 4 s during a page load (and for the length of a session
+    // download). So every visit hit ping-at-5-s while the radio was busiest with
+    // ESP-NOW, the ping's TCP segment went unacked past AsyncTCP's ack timeout,
+    // _onTimeout() closed the socket, and the freshly loaded page bounced
+    // connected/offline. That is the flicker on entering the dashboard.
+    //
+    // Nothing is lost: the browser reconnects on visibility/online changes and
+    // runs its own stall watchdog, so a phone that walked away comes back on its
+    // own terms rather than being policed from here.
+    client->keepAlivePeriod(0);
+    DLOG("WS", "เชื่อมต่อ #%u จาก %s (รวม %u)", client->id(),
+         ip.toString().c_str(), (unsigned)server->count());
   } else if (type == WS_EVT_DISCONNECT) {
     DLOG("WS", "ตัดการเชื่อมต่อ #%u (เหลือ %u)", client->id(),
          (unsigned)server->count());
@@ -1400,8 +1416,6 @@ static void registerRoutes() {
     // "ระหว่าง" ที่กำลังโหลดหน้า ซึ่งแย่กว่าปล่อยให้ socket เดิมเงียบๆ
     // แค่หยุดป้อนข้อมูลก็พอ — หน้าเก่าจะปิด socket เองตอน pagehide
     g_streamQuietUntilMs = t0 + STREAM_QUIET_MS;
-    g_loadingIp = (uint32_t)ip;
-    g_loadingUntilMs = t0 + LOAD_GUARD_MS;
     g_pageStartMs = t0;
     g_pagePending = true;
 
@@ -1424,7 +1438,6 @@ static void registerRoutes() {
     // instead of always burning the whole quiet window.
     req->onDisconnect([t0]() {
       g_streamQuietUntilMs = 0;
-      g_loadingUntilMs = 0;
       g_pagePending = false;
       g_pageOk++;
       DLOG("HTTP", "ส่งหน้าเว็บเสร็จใน %lu ms (%u B) ✓",
@@ -1447,7 +1460,6 @@ static void registerRoutes() {
     doc["wsClients"] = g_ws.count();
     doc["wsDropped"] = g_wsDropped;
     doc["quietDrops"] = g_quietDrops; // batches yielded to a page load
-    doc["wsRejected"] = g_wsRejected; // handshakes refused during a page load
     doc["logSeq"] = DiagLog::lastSeq();
     // false = this rig has never been through the setup wizard (fresh, or
     // just factory-reset). Any phone that connects opens the wizard itself.
@@ -2034,24 +2046,40 @@ bool begin() {
   Serial.printf("[WIFI] AP '%s' up at %s (channel %d)\n", AP_SSID,
                 ip.toString().c_str(), AP_CHANNEL);
 
+  // Log association events. Without these, "the dashboard is offline" is
+  // unanswerable from here: a phone that dropped off the access point and a phone
+  // that is associated but whose HTTP is failing look identical — both show
+  // ws=0 and no requests. These two lines separate them.
+  WiFi.onEvent([](arduino_event_id_t, arduino_event_info_t info) {
+    const uint8_t *m = info.wifi_ap_staconnected.mac;
+    DLOG("WIFI", "เครื่องเข้าร่วม %02X:%02X:%02X:%02X:%02X:%02X (รวม %u)",
+         m[0], m[1], m[2], m[3], m[4], m[5],
+         (unsigned)WiFi.softAPgetStationNum());
+  }, ARDUINO_EVENT_WIFI_AP_STACONNECTED);
+
+  WiFi.onEvent([](arduino_event_id_t, arduino_event_info_t info) {
+    const uint8_t *m = info.wifi_ap_stadisconnected.mac;
+    DLOG("WIFI", "เครื่องออก %02X:%02X:%02X:%02X:%02X:%02X (เหลือ %u)",
+         m[0], m[1], m[2], m[3], m[4], m[5],
+         (unsigned)WiFi.softAPgetStationNum());
+  }, ARDUINO_EVENT_WIFI_AP_STADISCONNECTED);
+
   // captive portal: จับ DNS ทุกโดเมน → AP IP · มือถือเช็กเน็ตจะโดน redirect เด้ง dashboard
   g_dns.setErrorReplyCode(DNSReplyCode::NoError);
   g_dns.start(53, "*", ip);
   Serial.println("[DNS] captive portal เปิด (ทุกโดเมน → dashboard)");
 
   g_ws.onEvent(onWsEvent);
-  g_ws.handleHandshake([](AsyncWebServerRequest *req) -> bool {
-    const uint32_t ip = (uint32_t)req->client()->remoteIP();
-    const uint32_t now = millis();
-    if (g_loadingUntilMs && (int32_t)(now - g_loadingUntilMs) < 0 &&
-        ip == g_loadingIp) {
-      g_wsRejected++;
-      DLOG("WS", "ปฏิเสธ handshake จาก %s — กำลังส่งหน้าเว็บอยู่",
-           req->client()->remoteIP().toString().c_str());
-      return false;
-    }
-    return true;
-  });
+  // NO handshake gate here — deliberately.
+  //
+  // There used to be one that refused WebSocket upgrades from an IP for 2 s after
+  // it requested the dashboard, meant to stop the outgoing page's socket from
+  // retrying during the transfer. It backfired: the *incoming* page runs its JS
+  // and dials its socket within a few hundred milliseconds of the document
+  // landing, so the fresh page got refused, retried on a 400 ms backoff, and the
+  // connection indicator flickered offline/connecting for the first couple of
+  // seconds of every visit. The reconnect storm it was written for came from
+  // closing old sockets in sendDashboard, which no longer happens.
   g_http.addHandler(&g_ws);
   registerRoutes();
   modelsMigrateLegacy(); // fold any pre-library /model.json into /models
@@ -2110,8 +2138,33 @@ static void flushImuBatch() {
   // for those whose own queue is full, so a slow phone degrades alone.
   // IMU frames are real-time: a dropped batch beats a dropped connection.
   if (g_ws.count() && ESP.getFreeHeap() >= 40 * 1024) {
-    if (g_ws.binaryAll(g_batch, g_batchLen) == AsyncWebSocket::DISCARDED)
+    if (g_ws.binaryAll(g_batch, g_batchLen) == AsyncWebSocket::DISCARDED) {
       g_wsDropped++;
+      // Zombie defence, by BEHAVIOUR rather than by counting sockets.
+      //
+      // Counting was tried twice and both attempts became reconnect engines: they
+      // closed sockets that were perfectly healthy and merely numerous, and every
+      // such close made the page dial again. What actually identifies a dead
+      // socket is that it never accepts anything — a phone that walked out of
+      // range leaves a client whose queue stays full forever, while a working page
+      // drains one every few milliseconds.
+      //
+      // DISCARDED means NO client accepted this batch. Sustained for this long,
+      // every socket in the list is wedged, so dropping the lot is right: pages
+      // that are actually alive reconnect within a second and stream again. Any
+      // single accepting client resets the timer, so a healthy page can never be
+      // caught by this, however many zombies sit beside it.
+      if (g_allDiscardSinceMs == 0)
+        g_allDiscardSinceMs = millis();
+      else if (millis() - g_allDiscardSinceMs > WS_WEDGED_MS) {
+        DLOG("WS", "ทุก client ไม่รับข้อมูลนาน %lu วิ — ปิดทั้งหมดให้ต่อใหม่",
+             (unsigned long)(WS_WEDGED_MS / 1000));
+        g_ws.closeAll();
+        g_allDiscardSinceMs = 0;
+      }
+    } else {
+      g_allDiscardSinceMs = 0; // somebody took it — nothing is wedged
+    }
   }
   g_batchLen = 0;
 }
@@ -2167,7 +2220,6 @@ void loop() {
     g_pagePending = false;
     g_pageStalled++;
     g_streamQuietUntilMs = 0; // don't stay muted forever on a dead load
-    g_loadingUntilMs = 0;
     DLOG("HTTP", "⚠ ส่งหน้าเว็บไม่จบใน 10 วิ — ค้าง (สำเร็จ %lu / ค้าง %lu)",
          (unsigned long)g_pageOk, (unsigned long)g_pageStalled);
   }
@@ -2175,7 +2227,7 @@ void loop() {
   static uint32_t lastCleanupMs = 0;
   if (now - lastCleanupMs >= 500) {
     lastCleanupMs = now;
-    g_ws.cleanupClients();
+    g_ws.cleanupClients(MAX_WS_CLIENTS);
   }
   if (g_rebootAtMs && (int32_t)(now - g_rebootAtMs) >= 0) {
     Serial.println("[RESET] rebooting…");
@@ -2207,12 +2259,13 @@ static void logStats() {
     return;
   g_lastStatsLogMs = now;
   Serial.printf(
-      "[STATS] rx=%lu drop=%lu wsdrop=%lu nodes=%u ws=%u sess=%s sd=%s "
+      "[STATS] rx=%lu drop=%lu wsdrop=%lu nodes=%u wifi=%u ws=%u sess=%s sd=%s "
       "rows=%lu heap=%lu\n",
       (unsigned long)EspNowRx::packetsReceived(),
       (unsigned long)EspNowRx::packetsDropped(),
       (unsigned long)WebServerApp::wsDropped(),
       (unsigned)Session::liveNodeCount(3000),
+      (unsigned)WiFi.softAPgetStationNum(),
       (unsigned)WebServerApp::connectedClients(),
       Session::isActive() ? "ON" : "off", SdLogger::isReady() ? "OK" : "ERR",
       (unsigned long)SdLogger::rowsWritten(), (unsigned long)ESP.getFreeHeap());
@@ -2327,8 +2380,9 @@ void loop() {
   if (nowMs - lastHealthLogMs >= 15000) {
     lastHealthLogMs = nowMs;
     DLOG("SYS",
-         "โหนด %u · ws %u · rx %lu drop %lu · wsdrop %lu quiet %lu · heap %lu",
+         "โหนด %u · wifi %u · ws %u · rx %lu drop %lu · wsdrop %lu quiet %lu · heap %lu",
          (unsigned)Session::liveNodeCount(3000),
+         (unsigned)WiFi.softAPgetStationNum(),
          (unsigned)WebServerApp::connectedClients(),
          (unsigned long)EspNowRx::packetsReceived(),
          (unsigned long)EspNowRx::packetsDropped(),

@@ -89,9 +89,30 @@ function detach(ws, closeIt) {
   } catch { /* already gone */ }
 }
 
+// Storm brake. A reconnect loop between page and rig once ran at ~2.5 sockets a
+// second for as long as the tab was open. The cause is fixed in firmware, but a
+// dial-instantly-on-every-close policy will amplify any future one just as hard,
+// so rapid repeats get an escalating floor instead of the snappy 400 ms.
+const RECENT_WINDOW_MS = 10000;
+const RECENT_LIMIT     = 6;
+let recentConnects = [];
+
 function scheduleReconnect() {
   if (reconnectTimer || tearingDown) return;
-  reconnectTimer = setTimeout(() => { reconnectTimer = null; startWs(); }, backoff);
+
+  const now = performance.now();
+  recentConnects = recentConnects.filter(t => now - t < RECENT_WINDOW_MS);
+  let wait = backoff;
+  if (recentConnects.length >= RECENT_LIMIT) {
+    wait = Math.max(wait, 5000);
+    logLocal('WS', `ต่อใหม่ถี่ผิดปกติ (${recentConnects.length} ครั้ง/10 วิ) — ชะลอเป็น ${wait} ms`);
+  }
+
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    recentConnects.push(performance.now());
+    startWs();
+  }, wait);
   backoff = Math.min(backoff * 1.6, 3000);   // cap lower for snappier mobile recovery
 }
 
