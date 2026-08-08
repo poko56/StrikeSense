@@ -112,13 +112,15 @@ def make_windows(df: pd.DataFrame):
     df["cls"] = raw.map(remap).astype(int)
 
     Xs, ys = [], []
-    # a new "segment" starts whenever file / limb / class changes
-    seg_key = (
-        df["file_id"].astype(str) + "|" +
-        df["slot"].astype(str)    + "|" +
-        df["cls"].astype(str)
-    )
-    for _, seg in df.groupby((seg_key != seg_key.shift()).cumsum()):
+    # Group by (file, limb, class) — NOT by runs of consecutive identical rows.
+    #
+    # The logger writes samples in arrival order, and the Main Node interleaves
+    # limbs: one ESP-NOW frame carries 8 samples from one limb, so the slot column
+    # flips every 8 rows. Run-length segmentation therefore produced 8-row
+    # segments, all shorter than TIME_STEPS=50, and 268k rows collapsed to 20
+    # usable windows. Filtering by slot restores each limb's own continuous
+    # time series; groupby keeps rows in their original order within each group.
+    for _, seg in df.groupby(["file_id", "slot", "cls"], sort=False):
         feats = seg[FEATURE_COLS].to_numpy(dtype=np.float32)
         cls   = int(seg["cls"].iloc[0])
         for start in range(0, len(feats) - TIME_STEPS + 1, STEP_SIZE):
