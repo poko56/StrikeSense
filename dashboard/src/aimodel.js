@@ -36,7 +36,10 @@ const MIN_CONF = 0.35;                      // below this we still show, but fla
 let net  = null;   // parsed model (from ainet.parseModel): { timeSteps, features, labels, mean, std, layers[], meta }
 
 // cached DOM
-let elFile, elClear, elStatus, elEnable, elBig, elConf, elProbs, elRecent;
+let elFile, elClear, elStatus, elEnable, elBig, elConf, elProbs, elRecent, elList;
+
+// model library on the rig's SD card: many files, one active
+let library = { active: '', models: [] };
 
 // ───────────────────────── live buffers ─────────────────────────
 function ring(slot) {
@@ -137,12 +140,12 @@ function handleFile(file) {
     state.ai.enabled = true;         // auto-enable on successful upload
     state.ai.source  = 'local';
 
-    if (!isDemo()) {                 // persist to the rig's SD card
+    if (!isDemo()) {                 // save into the rig's SD card library
       state.ai.saving = true;
       state.ai.error  = '';
       renderAiModel();
-      api.modelUpload(JSON.stringify(doc))
-        .then(() => { state.ai.source = 'sd'; })
+      api.modelUpload(JSON.stringify(doc), file.name)   // filename → library entry
+        .then(() => { state.ai.source = 'sd'; return refreshLibrary(); })
         .catch(() => { state.ai.error = '⚠ บันทึกลง SD ไม่สำเร็จ — ใช้ได้เฉพาะเครื่องนี้'; })
         .finally(() => { state.ai.saving = false; renderAiModel(); });
     } else {
@@ -170,6 +173,79 @@ async function loadInitialModel() {
   renderAiModel();
 }
 
+// ───────────────────────── model library (SD) ─────────────────────────
+function fmtSize(n) {
+  return n >= 1024 ? (n / 1024).toFixed(0) + ' KB' : (n | 0) + ' B';
+}
+
+// Pull the list of models on the rig's SD card + which one is active.
+async function refreshLibrary() {
+  if (isDemo()) { library = { active: '', models: [] }; renderModelList(); return; }
+  try {
+    const r = await api.modelsList();
+    library = {
+      active: (r && r.active) || '',
+      models: (r && Array.isArray(r.models)) ? r.models : [],
+    };
+  } catch (e) {
+    library = { active: '', models: [] };   // device offline → empty list
+  }
+  renderModelList();
+}
+
+// Make `name` the active model on the rig, then load it for inference.
+async function selectModel(name) {
+  if (isDemo() || !name || name === library.active) return;
+  try {
+    await api.modelActivate(name);
+    const doc = await api.modelGet();
+    if (doc) { activate(doc); state.ai.source = 'sd'; state.ai.enabled = true; }
+    library.active = name;
+    state.ai.error = '';
+  } catch (e) {
+    state.ai.error = 'สลับโมเดลไม่สำเร็จ';
+  }
+  renderAiModel();
+}
+
+// Remove `name` from the library. If it was active, adopt whatever the device
+// promoted next (or clear inference if the library is now empty).
+async function deleteModel(name) {
+  if (isDemo() || !name) return;
+  const wasActive = name === library.active;
+  try { await api.modelRemove(name); } catch (e) { /* refresh below reflects truth */ }
+  await refreshLibrary();
+  if (wasActive) {
+    if (library.active) {
+      try { const doc = await api.modelGet(); if (doc) { activate(doc); state.ai.source = 'sd'; } }
+      catch (e) { /* leave as-is */ }
+    } else {
+      net = null;
+      state.ai.ready = false; state.ai.enabled = false; state.ai.meta = null; state.ai.last = null;
+    }
+  }
+  renderAiModel();
+}
+
+function renderModelList() {
+  if (!elList) return;
+  const models = library.models;
+  if (!models.length) {
+    elList.innerHTML = '<div class="ai-models-empty">คลังว่าง — กด “เพิ่มไฟล์โมเดล” เพื่ออัปโหลด</div>';
+    return;
+  }
+  elList.innerHTML = models.map(m => {
+    const active = m.name === library.active;
+    return `<div class="ai-model-row${active ? ' active' : ''}" data-name="${m.name}" role="button" tabindex="0" title="กดเพื่อเลือกใช้">`
+         + `<span class="ai-model-dot"></span>`
+         + `<span class="ai-model-name">${m.name}</span>`
+         + `<span class="ai-model-size mono">${fmtSize(m.size || 0)}</span>`
+         + (active ? `<span class="ai-model-badge">ใช้อยู่</span>` : '')
+         + `<button class="ai-model-del" data-del="${m.name}" title="ลบไฟล์นี้">🗑</button>`
+         + `</div>`;
+  }).join('');
+}
+
 // ───────────────────────── UI ─────────────────────────
 export function initAiModel() {
   elFile   = document.getElementById('aiModelFile');
@@ -180,6 +256,7 @@ export function initAiModel() {
   elConf   = document.getElementById('aiLastConf');
   elProbs  = document.getElementById('aiProbs');
   elRecent = document.getElementById('aiRecent');
+  elList   = document.getElementById('aiModelList');
   if (!elFile) return;   // panel absent → no-op
 
   elFile.addEventListener('change', e => {
@@ -187,14 +264,23 @@ export function initAiModel() {
     if (f) handleFile(f);
     e.target.value = '';   // allow re-selecting the same file
   });
-  elClear?.addEventListener('click', () => { clearModel(); renderAiModel(); });
+  elClear?.addEventListener('click', async () => { clearModel(); await refreshLibrary(); renderAiModel(); });
   elEnable?.addEventListener('change', e => {
     state.ai.enabled = e.target.checked && state.ai.ready;
     renderAiModel();
   });
 
+  // model library: click a row to select · trash icon to delete
+  elList?.addEventListener('click', e => {
+    const del = e.target.closest('.ai-model-del');
+    if (del) { e.stopPropagation(); deleteModel(del.dataset.del); return; }
+    const row = e.target.closest('.ai-model-row');
+    if (row) selectModel(row.dataset.name);
+  });
+
   // restore from SD card (preferred) or this browser's local cache
   loadInitialModel();
+  refreshLibrary();
 }
 
 const SLOT_TAG = ['—', 'L-HAND', 'R-HAND', 'L-SHIN', 'R-SHIN'];
@@ -202,6 +288,7 @@ const SLOT_TAG = ['—', 'L-HAND', 'R-HAND', 'L-SHIN', 'R-SHIN'];
 export function renderAiModel() {
   if (!elStatus) return;
   const ai = state.ai;
+  renderModelList();   // keep the library list in sync with active/upload/delete
 
   if (ai.saving) {
     elStatus.textContent = '⏳ กำลังบันทึกโมเดลลง SD card…';

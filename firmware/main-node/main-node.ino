@@ -1190,7 +1190,9 @@ static DNSServer g_dns; // captive portal DNS
 static uint32_t g_wsDropped =
     0; // frames dropped by backpressure (see broadcastImuFrame)
 
-static const char *MODEL_PATH = "/model.json";
+static const char *MODEL_PATH = "/model.json"; // legacy single model — migrated into the library on boot
+static const char *MODELS_DIR = "/models";     // AI model library (many models, one active)
+static const char *MODELS_ACTIVE = "/models/_active.txt"; // holds the active model's filename
 
 // Set by POST /api/factory-reset; the loop reboots once the response is on the
 // wire (rebooting from inside the handler kills the socket before the phone
@@ -1273,6 +1275,98 @@ static void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client,
          (unsigned)server->count());
   } else if (type == WS_EVT_ERROR) {
     DLOG("WS", "ผิดพลาด #%u", client->id());
+  }
+}
+
+// ── AI model library on SD (/models) ────────────────────────────────────────
+// Sanitize a client-supplied filename to a safe FAT name: keep [A-Za-z0-9._-],
+// force a .json suffix, cap the length. Blocks path traversal from the name.
+static String modelSanitize(const String &raw) {
+  String s;
+  for (size_t i = 0; i < raw.length() && s.length() < 48; i++) {
+    const char c = raw[i];
+    if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+        (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-')
+      s += c;
+    else
+      s += '_';
+  }
+  if (s.length() == 0)
+    s = "model";
+  if (!s.endsWith(".json"))
+    s += ".json";
+  return s;
+}
+
+static String modelFullPath(const String &name) {
+  return String(MODELS_DIR) + "/" + name;
+}
+
+static String modelActiveName() {
+  if (!SdLogger::isReady() || !SD.exists(MODELS_ACTIVE))
+    return String("");
+  File f = SD.open(MODELS_ACTIVE, FILE_READ);
+  if (!f)
+    return String("");
+  String n = f.readStringUntil('\n');
+  f.close();
+  n.trim();
+  return n;
+}
+
+static void modelSetActive(const String &name) {
+  if (!SdLogger::isReady())
+    return;
+  SD.mkdir(MODELS_DIR);
+  if (SD.exists(MODELS_ACTIVE))
+    SD.remove(MODELS_ACTIVE);
+  File f = SD.open(MODELS_ACTIVE, FILE_WRITE);
+  if (f) {
+    f.print(name);
+    f.close();
+  }
+}
+
+// First model file name in the library, or "" if empty (used to re-pick an
+// active model after a delete, and to empty the library on factory reset).
+static String modelFirstInLibrary() {
+  String first = "";
+  if (!SdLogger::isReady())
+    return first;
+  File dir = SD.open(MODELS_DIR);
+  if (dir && dir.isDirectory()) {
+    for (File f = dir.openNextFile(); f; f = dir.openNextFile()) {
+      String n = f.name();
+      const int slash = n.lastIndexOf('/');
+      if (slash >= 0)
+        n = n.substring(slash + 1);
+      const bool isDir = f.isDirectory();
+      f.close();
+      if (!isDir && n.endsWith(".json")) {
+        first = n;
+        break;
+      }
+    }
+  }
+  if (dir)
+    dir.close();
+  return first;
+}
+
+// One-time migration: fold a pre-library /model.json into the library so an
+// already-uploaded model survives the firmware update.
+static void modelsMigrateLegacy() {
+  if (!SdLogger::isReady())
+    return;
+  SD.mkdir(MODELS_DIR);
+  if (SD.exists(MODEL_PATH) && modelActiveName().length() == 0) {
+    const String dst = modelFullPath("model.json");
+    if (!SD.exists(dst.c_str()))
+      SD.rename(MODEL_PATH, dst.c_str());
+    else
+      SD.remove(MODEL_PATH);
+    modelSetActive("model.json");
+    DLOG("MODEL", "ย้ายโมเดลเดิม → คลัง (/models/model.json)");
   }
 }
 
@@ -1733,8 +1827,18 @@ static void registerRoutes() {
 
         uint32_t removed = wipeSessions ? SdLogger::wipeAllSessions() : 0;
         bool modelGone = false;
-        if (wipeModel && SdLogger::isReady() && SD.exists(MODEL_PATH)) {
-          modelGone = SD.remove(MODEL_PATH);
+        if (wipeModel && SdLogger::isReady()) {
+          if (SD.exists(MODEL_PATH) && SD.remove(MODEL_PATH))
+            modelGone = true;
+          // empty the whole library one file per pass (safe vs remove-in-scan)
+          for (int guard = 0; guard < 64; guard++) {
+            const String n = modelFirstInLibrary();
+            if (n.length() == 0)
+              break;
+            if (SD.remove(modelFullPath(n).c_str()))
+              modelGone = true;
+          }
+          modelSetActive("");
         }
         Session::factoryResetMemory();
 
@@ -1756,31 +1860,64 @@ static void registerRoutes() {
   // Upload once → stored on the card → any phone that connects auto-loads it
   // and runs gesture inference in-browser. No model = normal detection only.
 
-  // ---- GET /api/model (download the stored model, or 404) ----
+  // ---- GET /api/model → the ACTIVE model (kept for the dashboard auto-load) --
   g_http.on("/api/model", HTTP_GET, [](AsyncWebServerRequest *req) {
-    if (!SdLogger::isReady() || !SD.exists(MODEL_PATH)) {
+    const String active = modelActiveName();
+    const String path = modelFullPath(active);
+    if (!SdLogger::isReady() || active.length() == 0 ||
+        !SD.exists(path.c_str())) {
       req->send(404, "application/json", "{\"error\":\"no model\"}");
       return;
     }
     AsyncWebServerResponse *resp =
-        req->beginResponse(SD, MODEL_PATH, "application/json");
+        req->beginResponse(SD, path, "application/json");
     resp->addHeader("Cache-Control", "no-store");
     req->send(resp);
   });
 
-  // ---- DELETE /api/model ----
-  g_http.on("/api/model", HTTP_DELETE, [](AsyncWebServerRequest *req) {
-    if (SdLogger::isReady() && SD.exists(MODEL_PATH))
-      SD.remove(MODEL_PATH);
-    req->send(200, "application/json", "{\"ok\":true}");
+  // ---- GET /api/models → list the library + which one is active ----
+  g_http.on("/api/models", HTTP_GET, [](AsyncWebServerRequest *req) {
+    if (!SdLogger::isReady()) {
+      req->send(200, "application/json", "{\"active\":\"\",\"models\":[]}");
+      return;
+    }
+    const String active = modelActiveName();
+    String out = "{\"active\":\"" + active + "\",\"models\":[";
+    File dir = SD.open(MODELS_DIR);
+    bool first = true;
+    if (dir && dir.isDirectory()) {
+      for (File f = dir.openNextFile(); f; f = dir.openNextFile()) {
+        String name = f.name();
+        const int slash = name.lastIndexOf('/');
+        if (slash >= 0)
+          name = name.substring(slash + 1);
+        const bool isDir = f.isDirectory();
+        const uint32_t sz = (uint32_t)f.size();
+        f.close();
+        if (isDir || !name.endsWith(".json"))
+          continue;
+        if (!first)
+          out += ",";
+        first = false;
+        out += "{\"name\":\"" + name + "\",\"size\":" + String(sz) + "}";
+      }
+    }
+    if (dir)
+      dir.close();
+    out += "]}";
+    req->send(200, "application/json", out);
   });
 
-  // ---- POST /api/model (stream the uploaded JSON straight to SD) ----
+  // ---- POST /api/models?name=X → stream an uploaded model into the library ---
+  // The freshly uploaded model becomes active (matches the old upload=use flow).
   static File s_modelUp;
   static bool s_modelUpOk = false;
+  static String s_modelUpName;
   g_http.on(
-      "/api/model", HTTP_POST,
+      "/api/models", HTTP_POST,
       [](AsyncWebServerRequest *req) {
+        if (s_modelUpOk && s_modelUpName.length())
+          modelSetActive(s_modelUpName);
         req->send(s_modelUpOk ? 200 : 500, "application/json",
                   s_modelUpOk ? "{\"ok\":true}"
                               : "{\"error\":\"sd write failed\"}");
@@ -1792,9 +1929,14 @@ static void registerRoutes() {
           s_modelUpOk = false;
           if (!SdLogger::isReady())
             return;
-          if (SD.exists(MODEL_PATH))
-            SD.remove(MODEL_PATH);
-          s_modelUp = SD.open(MODEL_PATH, FILE_WRITE);
+          SD.mkdir(MODELS_DIR);
+          s_modelUpName = modelSanitize(req->hasParam("name")
+                                            ? req->getParam("name")->value()
+                                            : String("model.json"));
+          const String path = modelFullPath(s_modelUpName);
+          if (SD.exists(path.c_str()))
+            SD.remove(path.c_str());
+          s_modelUp = SD.open(path.c_str(), FILE_WRITE);
           if (!s_modelUp)
             return;
         }
@@ -1806,13 +1948,78 @@ static void registerRoutes() {
             s_modelUpOk = (s_modelUp.size() == total && total > 0);
             s_modelUp.close();
           }
-          DLOG("MODEL", "อัปโหลดโมเดล %s (%u ไบต์)",
+          DLOG("MODEL", "อัปโหลด %s %s (%u ไบต์)", s_modelUpName.c_str(),
                s_modelUpOk ? "สำเร็จ" : "ล้มเหลว", (unsigned)total);
         }
       });
 
-  // captive portal: request แปลกปลอม (probe เช็กเน็ตของมือถือ) → redirect ไป dashboard
-  // → มือถือเด้ง "Sign in to StrikeSense" เปิดหน้าให้เอง แทนที่จะรอ/ไม่ยอมต่อ
+  // ---- POST /api/models/activate?name=X → make X the active model ----
+  g_http.on("/api/models/activate", HTTP_POST,
+            [](AsyncWebServerRequest *req) {
+              if (!SdLogger::isReady() || !req->hasParam("name")) {
+                req->send(400, "application/json", "{\"error\":\"bad request\"}");
+                return;
+              }
+              const String name = modelSanitize(req->getParam("name")->value());
+              if (!SD.exists(modelFullPath(name).c_str())) {
+                req->send(404, "application/json", "{\"error\":\"not found\"}");
+                return;
+              }
+              modelSetActive(name);
+              DLOG("MODEL", "เลือกใช้โมเดล %s", name.c_str());
+              req->send(200, "application/json", "{\"ok\":true}");
+            });
+
+  // ---- DELETE /api/models?name=X → remove one model from the library ----
+  g_http.on("/api/models", HTTP_DELETE, [](AsyncWebServerRequest *req) {
+    if (!SdLogger::isReady() || !req->hasParam("name")) {
+      req->send(400, "application/json", "{\"error\":\"bad request\"}");
+      return;
+    }
+    const String name = modelSanitize(req->getParam("name")->value());
+    const String path = modelFullPath(name);
+    if (SD.exists(path.c_str()))
+      SD.remove(path.c_str());
+    if (modelActiveName() == name) // removed the active one → pick another
+      modelSetActive(modelFirstInLibrary());
+    DLOG("MODEL", "ลบโมเดล %s", name.c_str());
+    req->send(200, "application/json", "{\"ok\":true}");
+  });
+
+  // ---- DELETE /api/model → deactivate (clear active, keep files) ----
+  g_http.on("/api/model", HTTP_DELETE, [](AsyncWebServerRequest *req) {
+    modelSetActive("");
+    req->send(200, "application/json", "{\"ok\":true}");
+  });
+
+  // Captive-portal probes (Apple/Android/Windows): answer "online" so the phone
+  // VALIDATES the SoftAP and routes traffic to us. We used to redirect these to
+  // force a sign-in popup, but then the phone re-checked connectivity every few
+  // seconds — background traffic that jittered the live stream — and some phones
+  // parked the network as "no internet" (the original slow/never load). Success
+  // stops the re-checks and makes routing reliable. Trade-off: no auto popup —
+  // open http://192.168.4.1 in a browser (DNS + onNotFound still redirect URLs).
+  auto appleSuccess = [](AsyncWebServerRequest *req) {
+    req->send(
+        200, "text/html",
+        "<HTML><HEAD><TITLE>Success</TITLE></HEAD><BODY>Success</BODY></HTML>");
+  };
+  g_http.on("/hotspot-detect.html", HTTP_GET, appleSuccess);       // iOS/macOS
+  g_http.on("/library/test/success.html", HTTP_GET, appleSuccess); // iOS/macOS
+  g_http.on("/generate_204", HTTP_GET,                             // Android
+            [](AsyncWebServerRequest *req) { req->send(204); });
+  g_http.on("/gen_204", HTTP_GET,
+            [](AsyncWebServerRequest *req) { req->send(204); });
+  g_http.on("/connecttest.txt", HTTP_GET, // Windows
+            [](AsyncWebServerRequest *req) {
+              req->send(200, "text/plain", "Microsoft Connect Test");
+            });
+  g_http.on("/ncsi.txt", HTTP_GET, [](AsyncWebServerRequest *req) {
+    req->send(200, "text/plain", "Microsoft NCSI");
+  });
+
+  // Any other unknown host/path (a domain typed in the browser, resolved to us
+  // by the DNS catch-all) → the dashboard, so typing any http URL still works.
   g_http.onNotFound([](AsyncWebServerRequest *req) {
     req->redirect("http://192.168.4.1/");
   });
@@ -1847,6 +2054,7 @@ bool begin() {
   });
   g_http.addHandler(&g_ws);
   registerRoutes();
+  modelsMigrateLegacy(); // fold any pre-library /model.json into /models
   g_http.begin();
   Serial.println("[HTTP] Listening on :80");
   return true;
@@ -1862,9 +2070,18 @@ bool begin() {
 static constexpr size_t WS_FRAME_MAX =
     16 + IMU_SAMPLES_PER_PACKET * sizeof(ImuSample);
 static constexpr size_t WS_BATCH_CAP = WS_FRAME_MAX * 8;
-static constexpr uint32_t WS_BATCH_MS = 12; // under one 60 fps UI frame
-// ส่งเข้า WS แค่ 1 ใน N เฟรม (ลดโหลด SoftAP กับ 4 โหนด · live ไม่ต้อง 400Hz เต็ม · SD ยังเต็ม)
-#define WS_DOWNSAMPLE 4
+// Coalesce ~40ms of frames per WS message (was 12ms). At 12ms the SoftAP put
+// ~83 msg/s at the phone — faster than it drains — so batches piled into the
+// client send queue and it rendered frames hundreds of ms stale (bufferbloat,
+// felt as "delay"). ~40ms → ~25 msg/s the phone keeps up with, so the queue
+// stays shallow and live latency drops to about one batch. (A per-client
+// queueLen() drop-oldest guard would bound it harder, but getClients() has no
+// public lock — iterating it off the AsyncTCP task races client disconnect —
+// so we pace the send rate instead, which keeps the queue shallow safely.)
+static constexpr uint32_t WS_BATCH_MS = 40;
+// ส่งเข้า WS แค่ 1 ใน N เฟรม (ลดโหลด SoftAP · SD ยังเต็ม 400Hz)
+// 1-in-2: ครอบคลุมต่อโหนด ~50% (ลื่นกว่า 1-in-4) · batch 40ms คุม msg-rate ให้ต่ำอยู่แล้ว
+#define WS_DOWNSAMPLE 2
 static uint8_t g_batch[WS_BATCH_CAP];
 static size_t g_batchLen = 0;
 static uint32_t g_batchOpenMs = 0;

@@ -1705,6 +1705,42 @@ body.is-fs .dial-clock { font-size: 56px; }
 .ai-status.ok  { color: var(--teal-on);      border-color: rgba(74,194,148,.35); }
 .ai-status.err { color: var(--blood-bright); border-color: rgba(214,38,49,.4); }
 
+/* model library — which file is used / not, click a row to select it */
+.ai-models { display: flex; flex-direction: column; gap: 5px; margin: 10px 0 8px; }
+.ai-model-row {
+  display: flex; align-items: center; gap: 8px; padding: 7px 9px;
+  border: 1px solid var(--rule); border-radius: var(--radius);
+  background: var(--ink-1); cursor: pointer;
+  transition: border-color .12s ease, background .12s ease;
+}
+.ai-model-row:hover { border-color: rgba(74,194,148,.4); background: var(--ink-2); }
+.ai-model-row.active { border-color: rgba(74,194,148,.55); background: rgba(74,194,148,.08); }
+.ai-model-dot {
+  flex: 0 0 auto; width: 12px; height: 12px; border-radius: 50%;
+  border: 2px solid var(--rule-2); box-sizing: border-box;
+}
+.ai-model-row.active .ai-model-dot { border-color: var(--teal-on); background: var(--teal-on); }
+.ai-model-name {
+  flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font: 600 11.5px/1.3 var(--f-body); color: var(--paper-2);
+}
+.ai-model-row.active .ai-model-name { color: var(--paper); }
+.ai-model-size { flex: 0 0 auto; font: 500 10px/1 var(--f-body); color: var(--paper-3); }
+.ai-model-badge {
+  flex: 0 0 auto; padding: 2px 6px; border-radius: 4px;
+  background: rgba(74,194,148,.16); color: var(--teal-on);
+  font: 700 8.5px/1 var(--f-display); letter-spacing: .08em;
+}
+.ai-model-del {
+  flex: 0 0 auto; border: none; background: none; cursor: pointer;
+  color: var(--paper-3); font-size: 13px; padding: 2px 4px; line-height: 1;
+}
+.ai-model-del:hover { color: var(--blood-bright); }
+.ai-models-empty {
+  padding: 8px 10px; text-align: center;
+  font: 500 10.5px/1.4 var(--f-body); color: var(--paper-3);
+}
+
 .ai-enable {
   display: flex; align-items: center; gap: 8px; margin: 4px 0 10px;
   font: 500 11px/1.3 var(--f-body); color: var(--paper-2); cursor: pointer;

@@ -69,8 +69,12 @@ export const api = {
     if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
     return res.json();
   },
-  modelUpload: (jsonText) => json('/api/model', {
+  // ── model library: many models on SD, one active ──
+  modelsList:    () => json('/api/models'),                        // { active, models:[{name,size}] }
+  modelUpload:   (jsonText, name) => json('/api/models?name=' + encodeURIComponent(name || 'model.json'), {
     method: 'POST', headers: { 'content-type': 'application/json' }, body: jsonText,
   }),
-  modelDelete: () => json('/api/model', { method: 'DELETE' }),
+  modelActivate: (name) => json('/api/models/activate?name=' + encodeURIComponent(name), { method: 'POST' }),
+  modelRemove:   (name) => json('/api/models?name=' + encodeURIComponent(name), { method: 'DELETE' }),
+  modelDelete:   () => json('/api/model', { method: 'DELETE' }),   // deactivate (clear active, keep files)
 };

@@ -282,10 +282,13 @@
         <div class="ai-file-row">
           <label class="ai-upload-btn">
             <input type="file" id="aiModelFile" accept=".json,application/json" hidden>
-            <span>⬆ เลือกไฟล์โมเดล</span>
+            <span>⬆ เพิ่มไฟล์โมเดล</span>
           </label>
-          <button id="aiModelClear" class="ai-clear-btn" type="button" title="ลบโมเดลออก">✕ ล้าง</button>
+          <button id="aiModelClear" class="ai-clear-btn" type="button" title="เลิกใช้โมเดล (ไฟล์ยังอยู่ในคลัง)">✕ เลิกใช้</button>
         </div>
+
+        <!-- model library: which file is used / not · click a row to select -->
+        <div class="ai-models" id="aiModelList"></div>
 
         <div class="ai-status" id="aiModelStatus">ยังไม่ได้โหลดโมเดล</div>
 
