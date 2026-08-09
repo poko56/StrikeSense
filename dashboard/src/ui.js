@@ -58,6 +58,10 @@ function fmtDate(unix) {
   const d = new Date(unix * 1000);
   return d.toLocaleString();
 }
+// A strike only carries a technique name when the trained model produced one.
+// Show that plainly instead of substituting a guess.
+function fmtType(t) { return t ? String(t).toUpperCase() : 'ไม่ระบุ'; }
+
 function fmtRelTime(ms) {
   const d = Date.now() - ms;
   if (d < 60_000) return `${Math.round(d/1000)}s`;
@@ -434,6 +438,29 @@ function renderTimeline() {
 }
 
 // ───── STRIKE LOG ─────
+
+/**
+ * Number + bar for one strike's score. The bar is what makes a column of eighty
+ * rows readable at a glance — the eye finds the long and short ones without
+ * reading a single digit, which two raw columns of g and °/s never allowed.
+ *
+ * 50 means a typical strike of that same technique (see strikescore.js). Strikes
+ * scored against the pooled reference instead — no model loaded, or the model
+ * declined to name the technique — are marked, because "average for a jab" and
+ * "average for anything" are not the same claim.
+ */
+function scoreCell(s) {
+  if (typeof s.score !== 'number') return '<span class="dim">—</span>';
+  const tier = s.score >= 70 ? 'hi' : s.score >= 45 ? 'mid' : 'lo';
+  const pooled = s.scoreRef === 'pooled';
+  const title = `แรง ${s.scorePower ?? '—'} · ความเร็ว ${s.scoreSpeed ?? '—'}`
+              + (pooled ? ' · เทียบกับหมัดทั่วไป (ยังไม่รู้ท่า)' : ' · เทียบกับท่าเดียวกัน');
+  return `<span class="sc-cell${pooled ? ' pooled' : ''}" title="${escapeAttr(title)}">`
+       + `<span class="sc-num">${s.score}</span>`
+       + `<span class="sc-track"><i class="t-${tier}" style="width:${s.score}%"></i></span>`
+       + `</span>`;
+}
+
 function renderStrikeLog() {
   const tbody = $('strikeTbody');
   if (!tbody) return;
@@ -444,7 +471,7 @@ function renderStrikeLog() {
     .filter(s => filter === 'all' || String(s.slot) === filter)
     .slice(-80).reverse();
   if (!rows.length) {
-    tbody.innerHTML = '<tr class="empty"><td colspan="8">— ยังไม่มีหมัด · waiting for strikes —</td></tr>';
+    tbody.innerHTML = '<tr class="empty"><td colspan="9">— ยังไม่มีหมัด · waiting for strikes —</td></tr>';
     return;
   }
   const newestId = state.strikes.length ? state.strikes[state.strikes.length - 1].id : 0;
@@ -454,7 +481,8 @@ function renderStrikeLog() {
       <td>${fmtClock(s.sessionMs)}</td>
       <td>${s.round || '—'}</td>
       <td><span class="slot-tag s${s.slot}">${SLOT_SHORT[s.slot]}</span></td>
-      <td class="type-cell">${s.type.toUpperCase()}</td>
+      <td class="type-cell">${fmtType(s.type)}</td>
+      <td class="sc-col">${scoreCell(s)}</td>
       <td class="num">${s.peakG.toFixed(1)}</td>
       <td class="num">${Math.round(s.peakDps)}</td>
       <td class="num">${fmtMs(s.recoverMs)}</td>
@@ -1392,10 +1420,20 @@ function openStrikeDetail(id) {
   const ctx = state.strikes.filter(x => x.slot === s.slot && Math.abs(x.id - id) <= 3);
   openModal(`
     <div class="dlg-head">
-      <div class="dlg-title">STRIKE #${s.id} · ${s.type.toUpperCase()}</div>
+      <div class="dlg-title">STRIKE #${s.id} · ${fmtType(s.type)}</div>
       <button class="dlg-x" onclick="document.getElementById('appDialog').close()">✕</button>
     </div>
     <div class="detail-grid">
+      <div class="stat"><div class="stat-lbl">คะแนน</div><div class="stat-val mono">${
+        typeof s.score === 'number' ? s.score : '—'
+      }<span class="stat-unit">/100</span></div>
+        <div class="dim small">${
+          typeof s.score === 'number'
+            ? `แรง ${s.scorePower} · ความเร็ว ${s.scoreSpeed} · `
+              + (s.scoreRef === 'pooled' ? 'เทียบหมัดทั่วไป' : 'เทียบท่าเดียวกัน · 50 = ปกติ')
+            : ''
+        }</div>
+      </div>
       <div class="stat"><div class="stat-lbl">PEAK</div><div class="stat-val mono">${s.peakG.toFixed(1)}<span class="stat-unit">g</span></div></div>
       <div class="stat"><div class="stat-lbl">ω</div><div class="stat-val mono">${Math.round(s.peakDps)}<span class="stat-unit">°/s</span></div></div>
       <div class="stat"><div class="stat-lbl">SLOT</div><div class="stat-val mono" style="font-size:22px">${SLOT_NAMES[s.slot]}</div></div>
@@ -1408,7 +1446,7 @@ function openStrikeDetail(id) {
       ${ctx.map(c => `
         <div class="ctx-row">
           <span class="mono">#${c.id}</span>
-          <span>${c.type.toUpperCase()}</span>
+          <span>${fmtType(c.type)}</span>
           <span class="mono">${c.peakG.toFixed(1)}g · ${fmtClock(c.sessionMs)}</span>
         </div>`).join('')}
     </div>
@@ -1469,6 +1507,16 @@ function openSessionReplay(id) {
     });
 }
 
+/** One human-readable line for whichever detector rule a session was cut with. */
+function describeDetect(d) {
+  if (!d) return '—';
+  const ms = `${Math.round(d.refractoryMs)} ms`;
+  return d.version >= 2
+    ? `${d.armG} g (หักแรงโน้มถ่วงแล้ว) / เว้น ${ms}`
+      + (d.minPeakDps ? ` / หมุน ≥ ${Math.round(d.minPeakDps)} dps` : '')
+    : `${d.thresholdG} g / ${ms}`;
+}
+
 function renderReplay(body, id, meta, session, setPlayer) {
   const S = session.summary;
   const dur = session.durationMs;
@@ -1515,13 +1563,24 @@ function renderReplay(body, id, meta, session, setPlayer) {
     <div class="rp-now" id="rpNow">— กด ▶ เพื่อดูการซ้อมย้อนหลัง —</div>
 
     <div class="kicker mt-4">รายการอาวุธ · ${S.strikes} ครั้ง</div>
+    <div class="dim small" style="margin-bottom:6px">${
+      session.aiUsed
+        ? `🤖 ระบุท่าด้วยโมเดลที่เทรนไว้ ${session.aiNamed}/${S.strikes} ครั้ง`
+          + ` · เกณฑ์ตรวจจับ ${describeDetect(session.detect)} (ค่าเดียวกับตอนเทรน)`
+          + (session.detect.minConf
+              ? ` · ต้องมั่นใจ ≥ ${Math.round(session.detect.minConf * 100)}% ถึงจะระบุชื่อ` : '')
+          + (session.aiNamed < S.strikes
+              ? ` · อีก ${S.strikes - session.aiNamed} ครั้งโมเดลไม่มั่นใจพอ จึงขึ้นว่า "ไม่ระบุ" แทนการเดา` : '')
+        : '⚠ ยังไม่ได้โหลดโมเดล AI — จะไม่ระบุชื่อท่าให้ (ไม่เดา) · อัปโหลดโมเดลในแท็บระบบก่อน'
+    }</div>
     <div class="rp-list" id="rpList">
       ${session.strikes.length
         ? session.strikes.map(x => `
             <div class="rp-row" data-t="${x.tMs}" data-id="${x.id}">
               <span class="rp-row-t mono">${fmtClock(x.tMs)}</span>
               <span class="slot-tag s${x.slot}">${SLOT_SHORT[x.slot]}</span>
-              <span class="rp-row-type">${x.type.toUpperCase()}</span>
+              <span class="rp-row-type${x.byAi ? ' is-ai' : ''}">${fmtType(x.type)}${x.byAi ? ` <i>${Math.round(x.conf * 100)}%</i>` : ''}</span>
+              <span class="rp-row-sc">${scoreCell(x)}</span>
               <span class="rp-row-g mono">${x.peakG.toFixed(1)}g</span>
             </div>`).join('')
         : '<div class="dim small">— ไม่พบการออกอาวุธในไฟล์นี้ —</div>'}
@@ -1613,7 +1672,8 @@ function renderReplay(body, id, meta, session, setPlayer) {
     const fresh = cur && (tMs - cur.tMs) < 900;
     elNow.innerHTML = fresh
       ? `<span class="rp-now-slot s${cur.slot}">${SLOT_NAMES_TH[cur.slot]}</span>
-         <span class="rp-now-type">${cur.type.toUpperCase()}</span>
+         <span class="rp-now-type${cur.byAi ? ' is-ai' : ''}">${fmtType(cur.type)}</span>
+         ${cur.byAi ? `<span class="rp-now-ai">🤖 ${Math.round(cur.conf * 100)}%</span>` : ''}
          <span class="rp-now-g mono">${cur.peakG.toFixed(1)}g</span>
          <span class="dim mono">· ${Math.round(cur.peakDps)}°/s</span>`
       : `<span class="dim">— ${session.strikes.length ? 'รอจังหวะถัดไป' : 'ไม่มีข้อมูลอาวุธ'} —</span>`;

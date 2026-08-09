@@ -62,10 +62,12 @@ function baseline(slot) {
 }
 
 function strikeWave(slot) {
-  // Build a packet whose peak |a| crosses threshold.
+  // Build a packet whose peak |a| clears the detector's arm threshold.
   // hands → moderate g + high gyro; shins → high g + roundhouse gyro
+  // The floor tracks DEFAULT_DETECT_V2.armG (dynamic g, so +1 for gravity) with
+  // headroom — a demo that silently drops half its strikes looks broken.
   const isHand = slot === 1 || slot === 2;
-  const peakG  = isHand ? (3.5 + Math.random()*7) : (4 + Math.random()*9);
+  const peakG  = isHand ? (7 + Math.random()*7) : (8 + Math.random()*9);
   const peakDps= isHand ? (200 + Math.random()*2000) : (400 + Math.random()*1800);
   return Array.from({length: 8}, (_, i) => {
     const env = Math.exp(-((i-3)**2) / 2); // peak around middle sample

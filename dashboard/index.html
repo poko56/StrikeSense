@@ -292,10 +292,21 @@
 
         <div class="ai-status" id="aiModelStatus">ยังไม่ได้โหลดโมเดล</div>
 
+        <!-- Which techniques this model was actually trained on. Anything else the
+             athlete throws comes back as the nearest of these, which is a guess by
+             construction — the coach has to be able to tell the two apart. -->
+        <div class="ai-coverage" id="aiCoverage"></div>
+
         <label class="ai-enable">
           <input type="checkbox" id="aiEnableToggle">
           <span>เปิดตรวจจับท่าด้วย AI</span>
         </label>
+
+        <label class="ai-enable">
+          <input type="checkbox" id="aiAlwaysName">
+          <span>ระบุท่าทุกครั้งที่ตี — ไม่งดตอบเพราะไม่มั่นใจ</span>
+        </label>
+        <div class="ai-hint dim small" id="aiAlwaysNameHint"></div>
 
         <div class="ai-readout">
           <div class="ai-big" id="aiLastLabel">—</div>
@@ -450,6 +461,7 @@
                 <th>ยก</th>
                 <th>ตำแหน่ง</th>
                 <th>ท่า</th>
+                <th class="sc-col">คะแนน</th>
                 <th class="num">แรง·g</th>
                 <th class="num">ω·°/s</th>
                 <th class="num">พัก·ms</th>
@@ -457,7 +469,7 @@
             </thead>
             <tbody id="strikeTbody">
               <tr class="empty">
-                <td colspan="8">— ยังไม่มีการออกอาวุธ —</td>
+                <td colspan="9">— ยังไม่มีการออกอาวุธ —</td>
               </tr>
             </tbody>
           </table>
@@ -582,13 +594,17 @@
         <div class="kicker mt-4">ตั้งค่าการตรวจจับ · TUNING</div>
         <label class="row-inline">
           <span class="meta-k">เกณฑ์แรง</span>
-          <input type="range" id="thrSlider" min="1.5" max="10" step="0.1" value="3.0">
-          <span class="mono" id="thrVal">3.0 g</span>
+          <!-- Peak |accel| including gravity, so a limb at rest already reads
+               1.0 g. Below ~4 g an ordinary footfall on a shin node counts as a
+               strike, which is why the floor is no longer 1.5. -->
+          <input type="range" id="thrSlider" min="4" max="16" step="0.1" value="6.0">
+          <span class="mono" id="thrVal">6.0 g</span>
         </label>
         <label class="row-inline">
           <span class="meta-k">หน่วงเวลา</span>
-          <input type="range" id="refrSlider" min="100" max="800" step="10" value="250">
-          <span class="mono" id="refrVal">250 ms</span>
+          <!-- One kick is chamber + impact + foot landing inside ~400 ms. -->
+          <input type="range" id="refrSlider" min="250" max="900" step="10" value="400">
+          <span class="mono" id="refrVal">400 ms</span>
         </label>
 
         <div class="kicker mt-4">เอสดีการ์ด · SD</div>

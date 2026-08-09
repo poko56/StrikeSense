@@ -14,8 +14,14 @@ export const SLOT_SHORT = { 0: 'UA', 1: 'LH', 2: 'RH', 3: 'LS', 4: 'RS' };
 export const STRIKE_TYPES = ['jab', 'cross', 'hook', 'uppercut', 'elbow', 'kick', 'roundhouse', 'knee', 'push'];
 
 export const TUNING = {
-  thresholdG:    3.0,
-  refractoryMs:  250,
+  // Peak |accel| in g, gravity included — the same scale the live waveform draws,
+  // so the slider line sits where the coach sees the spike. A limb at rest already
+  // reads 1.0 g, which is why 3.0 g used to count an ordinary footfall as a
+  // strike; the detector works on the gravity-removed value (see detector.js).
+  thresholdG:    6.0,
+  // One kick is a chamber, an impact and a foot landing inside ~400 ms. A shorter
+  // lockout logged all three.
+  refractoryMs:  400,
   fatigueWindow: 30_000,
   asymWindow:    60_000,
 };
@@ -123,6 +129,9 @@ export const state = {
   // the dashboard runs 1D-CNN inference in-browser on the live IMU stream.
   ai: {
     enabled:   false,            // run inference on strikes
+    // Name every impact instead of abstaining when the model is unsure. Trades
+    // accuracy for coverage — see MIN_CONF handling in aimodel.js.
+    alwaysName: false,
     ready:     false,            // a valid model is loaded
     meta:      null,             // { labels[], time_steps, features, label_mode, created }
     error:     '',               // last load error (shown in panel)

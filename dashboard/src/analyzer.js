@@ -1,7 +1,42 @@
 // Strike detection, waveform buffer, per-round + time-on-target tracking.
 import { state, scheduleRender, pushActivity, WAVEFORM_SAMPLES } from './state.js';
 import { applyOffset, isCalibrating, collectSample } from './calibrate.js';
-import { aiOnStrike, aiPushSample } from './aimodel.js';
+import { aiOnStrike, aiPushSample, aiDetectParams, aiStrikeNorm } from './aimodel.js';
+import { createDetector } from './detector.js';
+import { scoreStrike } from './strikescore.js';
+
+// One detector for the whole rig; it keeps its own per-slot state. Rebuilt
+// whenever the active settings change, because a detector carries the arm/search
+// state machine and cannot have its rules swapped mid-strike.
+let detector = createDetector(null);
+let detectorKey = '';
+
+function activeDetector() {
+  const cfg = aiDetectParams() || tuningToDetect(state.tuning);
+  const key = JSON.stringify(cfg);
+  if (key !== detectorKey) { detector = createDetector(cfg); detectorKey = key; }
+  return detector;
+}
+
+/**
+ * No model loaded → detect on the manual sliders, but with the v2 rules. The
+ * slider stays in the units a coach thinks in (peak |accel| in g, gravity
+ * included, matching the waveform's own scale); the detector wants gravity
+ * removed, hence the -1.
+ */
+export function tuningToDetect(t) {
+  return {
+    version:      2,
+    armG:         Math.max(0.5, (t.thresholdG ?? 6) - 1),
+    releaseG:     Math.max(0.3, ((t.thresholdG ?? 6) - 1) * 0.4),
+    refractoryMs: t.refractoryMs ?? 400,
+    searchMs:     60,
+    minPeakDps:   0,
+  };
+}
+
+/** Live/replay views show the rule currently in force. */
+export function activeDetectParams() { return activeDetector().cfg; }
 
 export function magA(s) { return Math.sqrt(s.ax*s.ax + s.ay*s.ay + s.az*s.az); }
 export function magG(s) { return Math.sqrt(s.gx*s.gx + s.gy*s.gy + s.gz*s.gz); }
@@ -107,14 +142,21 @@ export function ingestBatch({ slot, rssi, mac, samples, seq, recvMs }) {
 
   // strike detection — always fires (live feedback + gesture preview). Whether it
   // COUNTS toward the session stats/radar is gated on recording below.
+  //
+  // Detect on the loaded model's own settings when it has them, so the window the
+  // model is handed is cut exactly as its training windows were. Falls back to the
+  // manual sliders when no model is loaded.
   const recording = state.session.active || state.demoMode;
-  const lastStrikeAt = state.lastStrikeBySlot.get(slot) || 0;
-  if (maxG >= state.tuning.thresholdG && (nowPerf - lastStrikeAt) >= state.tuning.refractoryMs) {
+  const hit = activeDetector().feed(slot, { maxG, maxDps, n: samples.length, tMs: nowPerf });
+  if (hit) {
     state.lastStrikeBySlot.set(slot, nowPerf);
     la.lastHitMs = Date.now();
     state.ui.bodyHitFlash.set(slot, nowPerf);          // body-map flash works even when idle
-    const ai = aiOnStrike(slot);                        // gesture preview runs live too
-    if (recording) recordStrike({ slot, peakG: maxG, peakDps: maxDps, recvMs: recvMs ?? Date.now(), seq, ai });
+    // The detector spends up to searchMs finding the true peak, so by now the
+    // stream has moved past it. hit.endBack rewinds the window to the impact.
+    const ai = aiOnStrike(slot, hit.endBack);           // gesture preview runs live too
+    if (recording) recordStrike({ slot, peakG: hit.peakG, peakDps: hit.peakDps,
+                                  recvMs: recvMs ?? Date.now(), seq, ai });
   }
 
   scheduleRender();
@@ -122,13 +164,27 @@ export function ingestBatch({ slot, rssi, mac, samples, seq, recvMs }) {
 
 function recordStrike({ slot, peakG, peakDps, recvMs, seq, ai }) {
   const sessionT = state.session.active ? (recvMs - state.session.startedAtMs) : 0;
-  const type     = classifyStrike(slot, peakG, peakDps);
+  // Technique naming comes from the trained model alone. classifyStrike() is a
+  // hand-tuned ladder of peak-G / rotation cut-offs that answers with the same
+  // confidence whether or not it has any basis, and it cannot separate techniques
+  // that differ in shape rather than force. Unnamed is honest; a guess dressed up
+  // as a reading is not.
+  const type     = (ai && ai.label) || null;
   const lastT    = state.strikes.length ? state.strikes[state.strikes.length - 1].sessionMs : 0;
   const recoverMs= sessionT - lastT;
+
+  // Score against strikes of the SAME technique when the model named it, so an
+  // uppercut is not marked weak for landing at an uppercut's normal force.
+  // Unnamed strikes fall back to the pooled reference.
+  const sc = scoreStrike({ peakG, peakDps }, aiStrikeNorm(type));
 
   const ev = {
     id:        ++state.strikeSeq,
     slot, type, peakG, peakDps,
+    score:      sc.score,
+    scorePower: sc.power,
+    scoreSpeed: sc.speed,
+    scoreRef:   sc.ref,
     aiLabel:   ai ? ai.label : null,
     aiConf:    ai ? ai.conf  : 0,
     durationMs: 0,
@@ -141,7 +197,9 @@ function recordStrike({ slot, peakG, peakDps, recvMs, seq, ai }) {
   state.strikes.push(ev);
   if (state.strikes.length > 500) state.strikes.shift();
 
-  state.distribution[type]      = (state.distribution[type] || 0) + 1;
+  // Unnamed strikes still count toward force/asymmetry/fatigue — only the
+  // technique breakdown needs a name to bucket into.
+  if (type) state.distribution[type] = (state.distribution[type] || 0) + 1;
   state.histogram[bucketForce(peakG)]++;
   if (slot === 1 || slot === 3) state.leftCount++;
   if (slot === 2 || slot === 4) state.rightCount++;

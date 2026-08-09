@@ -58,9 +58,20 @@ export function parseModel(doc) {
   return {
     timeSteps: doc.time_steps, features: doc.features,
     labels: doc.labels, mean, std, layers,
+    // Which limb throws each technique ('hand' | 'leg' | 'any'), so the dashboard
+    // can rule out labels the firing limb cannot produce. Absent in older files;
+    // aimodel.js falls back to reading the technique name.
+    limbs: Array.isArray(doc.limbs) && doc.limbs.length === doc.labels.length ? doc.limbs : null,
+    // Per-class Gaussian over [log peak accel, log peak gyro], blended into the
+    // network's log-probabilities at run time. Absent in older files, and absent
+    // whenever the training calibration found no gain — both mean "network alone".
+    physics: (doc.physics && Array.isArray(doc.physics.mean)
+              && doc.physics.mean.length === doc.labels.length) ? doc.physics : null,
     meta: {
       labels: doc.labels, time_steps: doc.time_steps, features: doc.features,
       label_mode: doc.label_mode || '—', created: doc.created || '',
+      // Detector settings the model was trained with (absent in older files).
+      detect: doc.detect || null,
     },
   };
 }

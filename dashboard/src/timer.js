@@ -34,7 +34,10 @@ export function resetTimer() {
   const prev = state.timer.mode;
   Object.assign(state.timer, {
     mode: 'idle', currentRound: 0, phaseStartMs: 0,
-    remainingMs: state.timer.workSec * 1000,
+    // In stopwatch mode this field holds ELAPSED time, not time left, so a reset
+    // has to show 00:00. Seeding it with workSec put "03:00" on the dial of a
+    // stopwatch that had not been started.
+    remainingMs: state.timer.stopwatch ? 0 : state.timer.workSec * 1000,
     stopwatchStartMs: 0,
     paused: false,
   });
@@ -43,16 +46,21 @@ export function resetTimer() {
 }
 
 export function startTimer() {
-  state.timer.paused = false;
   if (state.timer.stopwatch) {
+    // Already counting — pressing start again must not silently throw the
+    // elapsed time away mid-session.
+    if (state.timer.mode === 'work' && !state.timer.paused) return;
+    if (state.timer.paused) { resumeTimer(); return; }
+    const prev = state.timer.mode;
     state.timer.mode = 'work';
     state.timer.remainingMs = 0;
     state.timer.stopwatchStartMs = performance.now();
     state.timer.phaseStartMs = state.timer.stopwatchStartMs;
-    emit('idle', 'work', 1);
+    emit(prev, 'work', 1);
     scheduleRender();
     return;
   }
+  state.timer.paused = false;
   if (state.timer.mode !== 'idle' && state.timer.mode !== 'done') return;
   const prev = state.timer.mode;
   state.timer.mode         = 'work';
@@ -110,7 +118,17 @@ export function skipPhase() {
   advancePhase();
 }
 
-function advancePhase() {
+/**
+ * Move to the next phase.
+ *
+ * @param {number} startedAtMs  the instant the NEW phase began — which is not
+ *   always "now". When a phase runs out on its own it began the moment the
+ *   previous one was due to end; passing `now` instead silently donates the
+ *   overshoot to every phase, and the round clock drifts away from the session
+ *   clock. When the coach hits ข้าม, `now` is exactly right, and that is the
+ *   default.
+ */
+function advancePhase(startedAtMs = performance.now()) {
   const t = state.timer;
   const prev = t.mode;
   if (t.mode === 'work') {
@@ -120,17 +138,21 @@ function advancePhase() {
       emit(prev, 'done', t.currentRound);
     } else {
       t.mode = 'rest'; t.remainingMs = t.restSec * 1000;
-      t.phaseStartMs = performance.now();
+      t.phaseStartMs = startedAtMs;
       emit(prev, 'rest', t.currentRound);
     }
   } else if (t.mode === 'rest') {
     t.currentRound++;
     t.mode = 'work'; t.remainingMs = t.workSec * 1000;
-    t.phaseStartMs = performance.now();
+    t.phaseStartMs = startedAtMs;
     emit(prev, 'work', t.currentRound);
   }
   scheduleRender();
 }
+
+// A tick that arrives very late has to walk forward one phase at a time. The cap
+// only exists so a misconfigured 0-second phase cannot spin forever.
+const MAX_CATCHUP_PHASES = 200;
 
 export function tickTimer() {
   const t = state.timer;
@@ -140,9 +162,24 @@ export function tickTimer() {
     return;
   }
   if (t.mode === 'idle' || t.mode === 'done') return;
-  const elapsed = performance.now() - t.phaseStartMs;
-  const total   = (t.mode === 'work' ? t.workSec : t.restSec) * 1000;
-  const remain  = Math.max(0, total - elapsed);
-  t.remainingMs = remain;
-  if (remain <= 0) advancePhase();
+
+  // Catch up; do not restart. requestAnimationFrame stops dead when the phone
+  // locks, and the 500 ms fallback interval is throttled by the browser and
+  // suspended outright on iOS — so a tick can arrive minutes late, covering
+  // several whole phases. Replaying them from the moment each was due keeps the
+  // round boundaries, and the per-round snapshots hung off them, on the real
+  // clock. Restarting the next phase at wake-up instead pushed every remaining
+  // round later by however long the screen had been off.
+  const now = performance.now();
+  for (let guard = 0; guard < MAX_CATCHUP_PHASES; guard++) {
+    const total  = (t.mode === 'work' ? t.workSec : t.restSec) * 1000;
+    const remain = total - (now - t.phaseStartMs);
+    if (remain > 0) { t.remainingMs = remain; return; }
+    advancePhase(t.phaseStartMs + total);
+    if (t.mode === 'done' || t.mode === 'idle') return;
+  }
+  // Phases of zero length — nothing sensible to catch up to. Anchor to now so
+  // the loop cannot run again on the next tick.
+  t.phaseStartMs = now;
+  t.remainingMs  = (t.mode === 'work' ? t.workSec : t.restSec) * 1000;
 }

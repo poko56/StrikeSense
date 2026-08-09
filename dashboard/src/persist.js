@@ -44,6 +44,7 @@ export const PERSIST_KEYS = {
   modes:          'modes',           // { bodyHeatmap, stopwatch }
   compare:        'compare',         // string[] session ids
   devMode:        'devMode',         // bool — reveal AI Training Data Logger
+  aiAlwaysName:   'aiAlwaysName',    // bool — name every impact, never "ไม่ระบุ"
   tourSeen:       'tourSeen',        // bool — onboarding tour completed/skipped
   setupDone:      'setupDone',       // bool — local fallback when the rig is unreachable
 };

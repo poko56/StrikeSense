@@ -39,7 +39,17 @@ const athHistory   = persist.get(K.athleteHistory, []);
 
 document.documentElement.dataset.theme = savedTheme;
 state.ui.theme = savedTheme;
-if (savedTuning) Object.assign(state.tuning, savedTuning);
+// The old defaults (3.0 g including gravity, 250 ms) counted an ordinary footfall
+// as a strike and split one kick into three. They were persisted the first time
+// the sliders moved, so upgrading the dashboard alone would leave every existing
+// rig on the numbers that caused the problem. Drop a stored copy of the OLD
+// DEFAULTS and take the new ones; a value the coach actually chose is kept.
+const LEGACY_TUNING = { thresholdG: 3.0, refractoryMs: 250 };
+if (savedTuning &&
+    !(savedTuning.thresholdG === LEGACY_TUNING.thresholdG &&
+      savedTuning.refractoryMs === LEGACY_TUNING.refractoryMs)) {
+  Object.assign(state.tuning, savedTuning);
+}
 if (savedGoals)  Object.assign(state.goals, savedGoals);
 if (savedModes)  { state.ui.bodyHeatmap = !!savedModes.bodyHeatmap; state.timer.stopwatch = !!savedModes.stopwatch; }
 loadCalibration();

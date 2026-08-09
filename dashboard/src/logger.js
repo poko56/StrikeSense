@@ -14,6 +14,7 @@
 //
 // Label encoding (tens-scheme, matches index.html <optgroup> + ml_pipeline):
 //   10-13 หมัด · 20-25 ศอก · 30-33 เข่า · 40-44 เตะ · 50-52 ถีบ
+//   90 = Move — the limb that is NOT throwing (footwork, stance switch, guard)
 //   coarse weapon class = floor(label/10) - 1  (0..4)
 // CSV columns: ax,ay,az,gx,gy,gz,slot,label   (slot 1=L-hand 2=R-hand 3=L-shin 4=R-shin)
 
@@ -32,6 +33,8 @@ const chips = {};   // slot -> chip element
 const SLOT_NAMES  = ['—', 'มือซ้าย', 'มือขวา', 'แข้งซ้าย', 'แข้งขวา'];
 const SLOT_SHORT  = ['—', 'L-HAND', 'R-HAND', 'L-SHIN', 'R-SHIN'];
 const NODE_STALE_MS = 3000;
+// Non-strike limb movement. Same number as MOVE_LABEL in ml_pipeline/train_model.py.
+const MOVE_LABEL  = '90';
 
 export function initLogger() {
   btnToggle = document.getElementById('btnRecordToggle');
@@ -143,16 +146,20 @@ export function logSensorData(sample, slot) {
   if (!isRecording) return;
   const label = selLabel ? selLabel.value : '41';
   const s = (slot | 0);
+  if (s < 1 || s > 4) return;                       // slot 0 = unassigned node
 
-  // Only capture the limb(s) that belong to this technique. Recording a kick
-  // must not also log idle-hand samples (or slot 0) mislabelled as "kick" —
-  // that pollutes the training set and hurts model accuracy.
-  if (!requiredSides(label).includes(s)) return;
+  // The striking limb carries the technique label. The OTHER limb is recorded as
+  // MOVE — it is not idle, it is stepping, switching stance and carrying weight
+  // while the technique is thrown, and that motion is exactly what the model was
+  // previously forced to call a kick because it had no other class for it. Do NOT
+  // go back to dropping these rows: without them "leg moved but did not kick" has
+  // no name in the training set, and the nearest kick wins by default.
+  const rowLabel = requiredSides(label).includes(s) ? label : MOVE_LABEL;
 
   recordedData.push([
     sample.ax.toFixed(4), sample.ay.toFixed(4), sample.az.toFixed(4),
     sample.gx.toFixed(3), sample.gy.toFixed(3), sample.gz.toFixed(3),
-    s, label,
+    s, rowLabel,
   ]);
 
   if (elCount) elCount.textContent = recordedData.length;
