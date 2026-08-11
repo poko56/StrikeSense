@@ -920,8 +920,83 @@ struct SessionEntry {
 };
 
 static void ensureDir(const char *path) {
-  if (!SD.exists(path))
-    SD.mkdir(path);
+  // SD.exists() answers "there is something at this name", which is not the
+  // same question. A plain file sitting where /sessions should be passes that
+  // check, so the directory is never created and every SD.open() underneath it
+  // fails — the card mounts, the card is writable, and recording still produces
+  // nothing but "failed to open" in the log.
+  File entry = SD.open(path);
+  if (entry) {
+    const bool isDir = entry.isDirectory();
+    entry.close();
+    if (isDir)
+      return;
+    Serial.printf("[SD] %s เป็นไฟล์ ไม่ใช่โฟลเดอร์ — ลบแล้วสร้างใหม่\n", path);
+    if (!SD.remove(path)) {
+      Serial.printf("[SD] ลบ %s ไม่สำเร็จ\n", path);
+      return;
+    }
+  }
+  if (SD.mkdir(path))
+    Serial.printf("[SD] สร้างโฟลเดอร์ %s\n", path);
+  else
+    Serial.printf("[SD] สร้างโฟลเดอร์ %s ไม่สำเร็จ\n", path);
+}
+
+/** Entries in a directory, counted up to `cap` so a huge one cannot stall boot. */
+static uint32_t countEntries(const char *path, uint32_t cap) {
+  File dir = SD.open(path);
+  if (!dir || !dir.isDirectory()) {
+    if (dir)
+      dir.close();
+    return 0;
+  }
+  uint32_t n = 0;
+  for (File f = dir.openNextFile(); f && n < cap; f = dir.openNextFile()) {
+    f.close();
+    ++n;
+  }
+  dir.close();
+  return n;
+}
+
+// Prove the card is writable at mount, not at the moment the coach presses REC.
+//
+// A mounted card is not necessarily a usable one: the adapter's lock switch, a
+// read-only mount, or a missing /sessions directory all leave SD.open(…,
+// FILE_WRITE) failing with nothing said until a session is already running and
+// silently recording nothing. One probe file at boot turns that into a line in
+// the log before anyone relies on it.
+static bool probeOne(const char *path) {
+  SD.remove(path);
+  File f = SD.open(path, FILE_WRITE);
+  if (!f)
+    return false;
+  const size_t written = f.print("ok");
+  f.close();
+  SD.remove(path);
+  return written == 2;
+}
+
+static void probeWritable() {
+  // Root first, then the sessions directory. Which of the two fails is the
+  // whole diagnosis: a card that refuses both is write-protected or mounted
+  // read-only, while a card that takes a file at root and refuses one in
+  // /sessions has a problem with that directory alone.
+  const bool rootOk = probeOne("/.ssprobe");
+  const bool dirOk = probeOne("/sessions/.ssprobe");
+  if (rootOk && dirOk) {
+    Serial.println("[SD] เขียนทดสอบผ่าน — บันทึกเซสชันได้");
+    return;
+  }
+  if (!rootOk && !dirOk) {
+    Serial.println("[SD] ⚠ เขียนไม่ได้ทั้งการ์ด — สวิตช์ล็อกบนอะแดปเตอร์ "
+                   "หรือระบบไฟล์ถูก mount แบบอ่านอย่างเดียว");
+    return;
+  }
+  Serial.printf("[SD] ⚠ เขียน root %s แต่ /sessions %s — ไฟล์ในโฟลเดอร์ %lu รายการ\n",
+                rootOk ? "ได้" : "ไม่ได้", dirOk ? "ได้" : "ไม่ได้",
+                (unsigned long)countEntries("/sessions", 5000));
 }
 
 static void writeHeader(const char *athleteName) {
@@ -1002,6 +1077,7 @@ bool retryMount() {
   if (!tryMount())
     return false;
   ensureDir("/sessions");
+  probeWritable();
   g_ready = true;
   return true;
 }
@@ -1015,6 +1091,7 @@ bool begin() {
   for (int attempt = 1; attempt <= 3; ++attempt) {
     if (tryMount()) {
       ensureDir("/sessions");
+  probeWritable();
       g_ready = true;
       return true;
     }
