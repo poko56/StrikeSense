@@ -1427,7 +1427,12 @@ static void registerRoutes() {
     AsyncWebServerResponse *resp = req->beginResponse_P(
         200, "text/html", DASHBOARD_HTML_GZ, DASHBOARD_HTML_GZ_LEN);
     resp->addHeader("Content-Encoding", "gzip");
-    resp->addHeader("Cache-Control", "public, max-age=86400");
+    // "max-age=86400" cached the whole single-file UI for a day, so a phone kept
+    // running the dashboard it happened to load first — for up to 24 hours after
+    // a re-flash, with no symptom other than the page behaving like the build it
+    // came from. Diagnosing that from the rig is near impossible: the browser
+    // never asks, so the request log simply stays empty.
+    resp->addHeader("Cache-Control", "no-cache, no-store, must-revalidate");
     // Don't let the browser reuse a keep-alive socket for this: the polling
     // connections have been sitting idle behind a saturated radio and a
     // half-stuck one turns into a page load that never completes. A fresh
