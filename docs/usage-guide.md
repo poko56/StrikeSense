@@ -12,21 +12,30 @@
 |---|---|
 | Wi-Fi SSID | **`StrikeSense`** |
 | Wi-Fi Password | **`muaythai123`** |
-| Dashboard | **http://192.168.4.1** |
-| WebSocket (IMU stream) | **`ws://192.168.4.1/ws`** |
-| REST API base | `http://192.168.4.1/api/…` |
+| Dashboard (กล้อง + sensor) | **`https://192.168.4.1`** (Local CA) หรือ **`https://<hostname>`** (Let's Encrypt) |
+| WebSocket (IMU stream) | URL เดียวกับ Dashboard โดยเปลี่ยนเป็น `wss://…/ws` |
+| REST API base | secure origin เดียวกัน + `/api/…` |
+
+> ถ้าใช้ Let's Encrypt ให้แทน `192.168.4.1` ในตัวอย่างด้านล่างด้วย hostname
+> ที่อยู่ใน `/tls/hostname.txt` และไม่ต้องส่ง `--cacert`. IP-address examples
+> เป็นของ Local-CA deployment เท่านั้น.
 
 **ขั้นตอน:**
 1. เปิด Main Node (ESP32-S3) → ไฟ NeoPixel ติด = AP พร้อม
 2. มือถือ/โน้ตบุ๊ก เชื่อม Wi-Fi `StrikeSense`
-3. เปิดเบราว์เซอร์ → `http://192.168.4.1`
+3. เปิดเบราว์เซอร์ → secure origin ตามตาราง (Local CA ต้องติดตั้ง/trust CA
+   certificate ก่อน; Let's Encrypt ไม่ต้อง; ดู
+   [motion-capture-https](motion-capture-https.md))
 4. เปิด Strike Node (ESP32-C3) ที่ข้อมือ/แข้ง → node จะโผล่ในหน้า Dashboard เมื่อส่งข้อมูลเข้ามา
+
+> HTTP/`ws://` ยังมีไว้สำหรับ service/legacy compatibility และไม่ใช่ secure
+> context: อย่าใช้กับ motion capture หรือข้อมูลที่ต้องการเข้ารหัส.
 
 ---
 
-## 2. เข้าถึง WebSocket โดยตรง (สำหรับทำ client เอง / ดีบั๊ก)
+## 2. เข้าถึง WSS โดยตรง (สำหรับทำ client เอง / ดีบั๊ก)
 
-WS ที่ `ws://192.168.4.1/ws` ส่ง **binary frame** (ไม่ใช่ JSON):
+WSS ที่ `wss://192.168.4.1/ws` ส่ง **binary frame** (ไม่ใช่ JSON):
 
 ```
 [ 16-byte header ]
@@ -43,7 +52,7 @@ WS ที่ `ws://192.168.4.1/ws` ส่ง **binary frame** (ไม่ใช�
 
 ### ทดสอบเร็วๆ ใน Browser Console
 ```js
-const ws = new WebSocket('ws://192.168.4.1/ws');
+const ws = new WebSocket('wss://192.168.4.1/ws');
 ws.binaryType = 'arraybuffer';
 ws.onmessage = e => {
   const dv = new DataView(e.data);
@@ -57,7 +66,7 @@ ws.onmessage = e => {
 ### ทดสอบด้วย CLI
 ```bash
 npm i -g wscat
-wscat -c ws://192.168.4.1/ws          # จะเห็น binary frame ไหลเข้ามา
+wscat -c wss://192.168.4.1/ws         # client ต้อง trust CA ของ rig ก่อน
 ```
 
 ---
@@ -144,6 +153,6 @@ Dashboard Logger  ──CSV──▶  train_model.py  ──.h──▶  flash E
 
 ## 7. เช็กสถานะเร็วๆ
 ```bash
-curl http://192.168.4.1/api/status    # heap, session, sd, ws clients
-curl http://192.168.4.1/api/nodes     # node ที่ออนไลน์ + battery + rssi
+curl --cacert ./strikesense-ca.pem https://192.168.4.1/api/status  # heap, session, sd, ws clients
+curl --cacert ./strikesense-ca.pem https://192.168.4.1/api/nodes   # node ที่ออนไลน์ + battery + rssi
 ```

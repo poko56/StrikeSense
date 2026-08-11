@@ -1,7 +1,10 @@
 # StrikeSense — Feature Catalog
 
 > สรุปฟีเจอร์ทั้งหมดของ Web Dashboard (เวอร์ชันปัจจุบัน · v0.2)
-> Dashboard ฝัง PROGMEM อยู่ใน Main Node firmware · เปิดผ่าน `http://192.168.4.1`
+> Dashboard ฝัง PROGMEM อยู่ใน Main Node firmware · เปิดผ่าน
+> secure origin: `https://192.168.4.1` สำหรับ Local CA หรือ
+> `https://<hostname>` สำหรับ Let's Encrypt หลัง provision certificate (ดู
+> [motion-capture-https](motion-capture-https.md))
 > Dev mode: `cd dashboard && npm run dev` → `http://localhost:5173/?demo=1`
 
 ---

@@ -153,5 +153,8 @@ cp strike_model.h ../firmware/main-node/
 
 ## 6. เชื่อมต่อใช้งานหลัง flash
 1. เชื่อม Wi-Fi: **SSID `StrikeSense` · รหัส `muaythai123`**
-2. เปิดเบราว์เซอร์ → **http://192.168.4.1**
+2. หลัง provision certificate ตาม [motion-capture-https](motion-capture-https.md)
+   ให้เปิดเบราว์เซอร์ → **https://192.168.4.1** สำหรับ Local CA หรือ
+   **`https://<hostname>`** สำหรับ Let's Encrypt (ชื่อใน `/tls/hostname.txt`)
+   — จำเป็นสำหรับ camera/WSS
 3. Data Logger อยู่แถบซ้าย ("AI TRAINING · DATA LOGGER")

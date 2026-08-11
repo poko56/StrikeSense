@@ -132,6 +132,25 @@ export function initScorecard() {
   }
 }
 
+// ── DOM writes that do not churn ─────────────────────────────────────────────
+// Assigning textContent DESTROYS the element's existing text node and creates a
+// new one — even when the string is identical. The render loop runs every frame,
+// so a label the coach is touching is rebuilt ten times during a 185 ms tap, and
+// the browser cancels the click because what was under the finger no longer
+// exists. Measured on an iPad: the lost tap landed on span#btnRecLabel, whose
+// text renderDial() rewrote unconditionally.
+//
+// Writing only on change also skips a layout invalidation per frame per label.
+function setText(el, value) {
+  if (!el) return;
+  const v = String(value);
+  if (el.textContent !== v) el.textContent = v;
+}
+function setHtml(el, value) {
+  if (!el) return;
+  if (el.innerHTML !== value) el.innerHTML = value;
+}
+
 export function renderScorecard() {
   if (!elData) return;
   const r = computeScores();
@@ -151,9 +170,8 @@ export function renderScorecard() {
 
   // grade + overall
   if (elGrade)    { elGrade.textContent = r.grade.letter; elGrade.className = 'score-grade ' + r.grade.cls; }
-  if (elGradeSub) elGradeSub.textContent = r.grade.th;
-  if (elOverall)  elOverall.textContent = r.ready ? r.overall : '—';
-
+  if (elGradeSub) setText(elGradeSub, r.grade.th);
+  if (elOverall) setText(elOverall, r.ready ? r.overall : '—');
   // per-axis bars (colour by tier)
   for (const a of r.axes) {
     const fill = document.getElementById('scb-' + a.key);
@@ -162,7 +180,7 @@ export function renderScorecard() {
       fill.style.width = a.value + '%';
       fill.className = 'sc-bar-fill ' + (a.value >= 70 ? 'tier-hi' : a.value >= 45 ? 'tier-mid' : 'tier-lo');
     }
-    if (val) val.textContent = r.ready ? a.value : '—';
+    if (val) setText(val, r.ready ? a.value : '—');
   }
 
   // strengths / weaknesses

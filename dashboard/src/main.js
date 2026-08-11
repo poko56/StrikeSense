@@ -7,8 +7,8 @@ import {
   bindSaveTuning, bindSaveModes, bindSaveGoals, openGoalsModal, openShortcutsModal,
 } from './ui.js';
 import { initSetup, openSetupWizard } from './setup.js';
-import { api as realApi } from './api.js';
-import { startWs } from './ws.js';
+import { api as realApi, releaseInitialRequestGate, openRequestLane } from './api.js';
+import { startWs, onWsOpen } from './ws.js';
 import {
   applyPreset, resetTimer, skipPhase, tickTimer, onPhaseChange,
   setStopwatch, startOrResumeTimer, pauseTimer,
@@ -19,13 +19,22 @@ import { persist, PERSIST_KEYS as K } from './persist.js';
 import { closeModal } from './modal.js';
 import { loadCalibration } from './calibrate.js';
 import { initLogger, renderLogger } from './logger.js';
-import { initAiModel, renderAiModel } from './aimodel.js';
+import { initAiModel, renderAiModel, startAiModelLoad } from './aimodel.js';
 import { initScorecard, renderScorecard } from './score.js';
 import { startTour } from './tour.js';
+import { checkFreshness } from './freshness.js';
+import { initTouchProbe } from './touchprobe.js';
 import { initDiagLog, setDiagLogEnabled, logLocal } from './diaglog.js';
+import { initMotionCapture, stopMotionCapture } from './motioncapture.js';
 
 const demo = isDemo();
 const api  = demo ? demoApi : realApi;
+// Settles once the status/node/library bootstrap reads are done. The setup
+// wizard waits for it rather than adding a fourth HTTPS request beside WSS —
+// and it must exist from the first line, because the bootstrap itself does not
+// start until the live stream has claimed its socket (see openRestLane below).
+let resolveHydration;
+const initialHydration = new Promise(resolve => { resolveHydration = resolve; });
 
 // ───── persistence: load saved state ─────
 const savedTheme   = persist.get(K.theme, 'dark');
@@ -60,6 +69,7 @@ initDiagLog(api);      // dev-mode diagnostic console (rig log + browser events)
 initLogger();          // AI training data logger panel
 initAiModel();         // AI gesture model — upload + live inference
 initScorecard();       // performance radar
+initMotionCapture();   // on-device phone pose; stays off until the coach permits camera
 subscribe(renderAll);
 subscribe(renderScorecard);
 subscribe(renderLogger);
@@ -98,9 +108,14 @@ function markSetupDone() {
 initSetup(api, { onTour: startTour, onFinish: markSetupDone });
 
 async function maybeOpenSetupWizard() {
+  await initialHydration;
+  // A rig with sensors already paired is not fresh — never cover a working setup
+  // with the full-screen first-run wizard (a reported "หน้าซ้อนทับกดปุ่มไม่ได้"
+  // case), whatever the stored flag says. Adopt it as done and move on.
+  if (state.nodes.some(n => n.slot > 0)) { markSetupDone(); return; }
   let rigIsFresh = null;
   try {
-    const s = await api.status();
+    const s = state.hostStatus || await api.status();
     if (s && typeof s.setupDone === 'boolean') rigIsFresh = !s.setupDone;
   } catch { /* unreachable — fall back to the local flag below */ }
   const localSeen = persist.get(K.setupDone, false);
@@ -108,11 +123,12 @@ async function maybeOpenSetupWizard() {
 }
 setTimeout(maybeOpenSetupWizard, 700);
 
+// Diagnostic strip, only with ?touchdebug=1 in the URL.
+initTouchProbe();
+
 if (demo) {
   document.getElementById('modeTxt').textContent = 'DEMO';
   startDemo();
-} else {
-  startWs();
 }
 
 // hydrate inputs from saved
@@ -457,9 +473,47 @@ function paced(fn, { whenHidden = false, onlyTab = null } = {}) {
   };
 }
 
-pollStatus(); pollNodes(); refreshLib();
-setInterval(paced(pollStatus), 1500);
-setInterval(paced(pollNodes),  2000);
+// ───── connect: the live stream goes first ─────
+//
+// The secure rig has exactly two TLS client sockets. The stream must claim one
+// BEFORE any REST request claims the other. Running the bootstrap reads first
+// (as an earlier attempt did) meant six serialized HTTPS requests — one of them
+// the ~140 KB model — held the single free slot, the WSS handshake was refused
+// every time, and the badge stayed Offline with `ws=0` on the rig for as long as
+// the tab was open. Worse, no request had a deadline, so one stalled read could
+// wedge the queue and the stream would never be dialled at all.
+if (!demo) startWs();
+
+const REST_LANE_GRACE_MS = 4000;
+let restLaneOpened = false;
+function openRestLane() {
+  if (restLaneOpened) return;
+  restLaneOpened = true;
+  openRequestLane();
+  // Bootstrap reads: cheap status/nodes/sessions only. The model download waits
+  // until these are done — see startAiModelLoad().
+  void Promise.all([pollStatus(), pollNodes(), refreshLib()]).finally(() => {
+    resolveHydration();
+    releaseInitialRequestGate();
+    startAiModelLoad();
+    // The hardware HTTPS listener intentionally has only WSS + one REST client
+    // slot.  checkFreshness() skips its document re-fetch on that origin; it
+    // remains useful in development/legacy HTTP mode.
+    void checkFreshness(typeof __BUILD_ID__ === 'string' ? __BUILD_ID__ : '', demo);
+  });
+}
+onWsOpen(openRestLane);
+// A rig whose stream cannot come up must still show its nodes and sessions, so
+// the lane opens anyway once WSS has had its chance at the first socket.
+setTimeout(openRestLane, demo ? 0 : REST_LANE_GRACE_MS);
+
+// Every REST poll on HTTPS costs a full TLS handshake, because each one-shot
+// response closes its session to free the slot. At 1.5 s + 2 s the rig spent
+// most of its internal heap on handshakes that compete with the live stream;
+// none of this data is time-critical (the IMU feed comes over WSS).
+const SECURE = location.protocol === 'https:';
+setInterval(paced(pollStatus), SECURE ? 3000 : 1500);
+setInterval(paced(pollNodes),  SECURE ? 5000 : 2000);
 setInterval(paced(refreshLib, { onlyTab: 'library' }), 10000);
 
 // Coming back to the app: refresh at once instead of waiting out the interval.
@@ -481,5 +535,9 @@ requestAnimationFrame(loop);
 // so phases still advance and the clock is right the moment they look back at it.
 // (Browsers clamp background intervals to ~1 Hz — plenty for a round timer.)
 setInterval(() => { if (document.hidden) tickTimer(); }, 500);
+
+// A page put in bfcache must relinquish the camera. Without this an iPhone can
+// leave its green camera indicator on after navigating away from the rig.
+window.addEventListener('pagehide', stopMotionCapture);
 
 window.__state = state;   // debug handle (also in demo, so the UI can be inspected)

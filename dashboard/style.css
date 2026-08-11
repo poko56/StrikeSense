@@ -134,7 +134,11 @@ body {
   font: 600 10.5px/1 var(--f-body); letter-spacing: .18em;
   padding: 4px 10px; border: 1px solid var(--rule); border-radius: 2px;
   background: var(--ink-2);
+  cursor: pointer;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
 }
+.conn:active { opacity: .8; }
 .conn-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--amber); }
 .conn.is-on .conn-dot { background: var(--teal-on); box-shadow: 0 0 6px var(--teal-on); }
 .conn.is-off .conn-dot { background: var(--blood); }
@@ -147,11 +151,19 @@ body {
 .layout {
   display: grid;
   grid-template-columns: var(--rail-l) 1fr var(--rail-r);
+  /* Row 1 is the hero; the rails span both rows beside it. Placement is explicit
+     because the hero is a direct child of .layout — it has to come first in the
+     DOM so a phone sees it without scrolling. */
+  grid-template-rows: auto 1fr;
   gap: var(--gap);
   padding: var(--gap);
   min-height: calc(100vh - var(--header-h) - var(--footer-h));
 }
 .rail { display: flex; flex-direction: column; gap: var(--gap); min-width: 0; }
+.rail-left  { grid-column: 1; grid-row: 1 / span 2; }
+.rail-right { grid-column: 3; grid-row: 1 / span 2; }
+.hero-block { grid-column: 2; grid-row: 1; }
+.stage      { grid-column: 2; grid-row: 2; }
 .stage { display: flex; flex-direction: column; gap: var(--gap); min-width: 0; }
 .stage-top {
   display: grid;
@@ -199,7 +211,9 @@ body {
 /* Data Logger is a developer tool — hidden unless dev mode is on */
 body:not(.is-dev) .logger-block { display: none; }
 body:not(.is-dev) .diag-block   { display: none; }
-body:not(.is-dev) .ai-block     { display: none; }
+/* AI MODEL panel is a coach control (load/enable a model), not a dev tool — it
+   stays visible for everyone. The training-data logger + diag console above
+   remain dev-only. */
 
 /* ──────── dev-mode diagnostic console ──────── */
 .diag-bar { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
@@ -273,7 +287,6 @@ body:not(.is-dev) .ai-block     { display: none; }
   font: 500 12.5px/1.2 var(--f-body);
   cursor: pointer;
 }
-.logger-select-wrap select:hover { border-color: var(--paper-faint); }
 .logger-select-wrap optgroup {
   font: 700 11px var(--f-display); letter-spacing: .1em;
   color: var(--gold); background: var(--ink-1);
@@ -295,7 +308,6 @@ body:not(.is-dev) .ai-block     { display: none; }
   cursor: pointer;
   transition: background .12s ease, border-color .12s ease, color .12s ease;
 }
-.logger-btn:hover { border-color: var(--paper-faint); background: var(--ink-2); }
 .logger-btn-record { border-color: rgba(214,38,49,.5); color: var(--blood-bright); }
 .logger-btn-record .rec-dot {
   width: 9px; height: 9px; border-radius: 50%; background: var(--blood-bright);
@@ -306,7 +318,6 @@ body:not(.is-dev) .ai-block     { display: none; }
 }
 .logger-btn-record.is-recording .rec-dot { animation: pulseDot 1s ease-in-out infinite; }
 .logger-btn-export { flex: 0 0 84px; color: var(--teal-on); border-color: rgba(74,194,148,.4); }
-.logger-btn-export:hover { color: var(--teal-on); }
 
 .logger-readout {
   display: grid; grid-template-columns: repeat(3, 1fr);
@@ -418,7 +429,6 @@ body:not(.is-dev) .ai-block     { display: none; }
   border: 1px solid rgba(212,166,72,.4); border-radius: var(--radius);
   font: 700 11px var(--f-body); letter-spacing: .04em; cursor: pointer;
 }
-.tour-launch:hover { background: var(--ink-3); border-color: var(--gold); }
 
 /* ════════ SESSION REPLAY ════════ */
 .rp-loading { padding: 6px 0 2px; }
@@ -453,7 +463,6 @@ body:not(.is-dev) .ai-block     { display: none; }
   border-radius: var(--radius); padding: 9px 12px; cursor: pointer;
   font: 700 12px var(--f-body); min-height: 42px; min-width: 46px;
 }
-.rp-btn:hover { border-color: var(--paper-3); }
 .rp-play { background: var(--blood); border-color: var(--blood); color: #fff; min-width: 96px; }
 .rp-play.is-playing { background: var(--ink-3); border-color: var(--rule-2); color: var(--paper); }
 .rp-time { margin-left: auto; font-size: 12px; color: var(--paper-2); }
@@ -502,14 +511,12 @@ body:not(.is-dev) .ai-block     { display: none; }
   border-bottom: 1px dashed rgba(255,255,255,.05);
 }
 .rp-row-sc { font: 500 11px var(--f-mono); font-variant-numeric: tabular-nums; }
-.rp-row:hover { background: var(--ink-2); }
 .rp-row.is-cur { background: var(--blood-deep); border-left: 2px solid var(--blood-bright); }
 .rp-row-t { color: var(--paper-3); font-size: 11px; }
 .rp-row-type { font: 600 11px var(--f-body); letter-spacing: .08em; color: var(--paper-2); }
 .rp-row-g { color: var(--paper); font-size: 12px; }
 
 .ico-btn.primary { color: var(--paper); border-color: var(--blood); background: var(--blood-deep); }
-.ico-btn.primary:hover { background: var(--blood); }
 
 @media (max-width: 760px), (pointer: coarse) {
   .rp-summary { grid-template-columns: repeat(2, 1fr); }
@@ -524,14 +531,27 @@ body:not(.is-dev) .ai-block     { display: none; }
 }
 
 /* ════════ RECOVERY ════════ */
+button, .recovery-btn, .ico-btn, .cal-all-btn, .tab, .chip, .setup-btn {
+  user-select: none;
+  -webkit-user-select: none;
+}
+button *, .recovery-btn *, .ico-btn *, .cal-all-btn *, .tab *, .chip *, .setup-btn * {
+  pointer-events: none;
+}
 .recovery-row { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px; margin-top: 8px; }
 .recovery-btn {
   padding: 9px 6px; background: var(--ink-2); color: var(--paper-2);
   border: 1px solid var(--rule-2); border-radius: var(--radius);
   font: 700 10.5px var(--f-body); letter-spacing: .02em; cursor: pointer;
   min-height: 44px;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
 }
-.recovery-btn:hover:not(:disabled) { background: var(--ink-3); border-color: var(--gold); color: var(--paper); }
+.recovery-btn:active:not(:disabled) {
+  background: var(--ink-3);
+  border-color: var(--gold);
+  color: var(--paper);
+}
 .recovery-btn:disabled { opacity: .5; cursor: default; }
 /* Base style for .ico-btn. Only scoped variants existed (.lib-row .ico-btn,
    .nc-actions .ico-btn), so anywhere else the class fell through to the browser's
@@ -541,8 +561,13 @@ body:not(.is-dev) .ai-block     { display: none; }
   background: transparent; border: 1px solid var(--rule-2);
   color: var(--paper-2); padding: 5px 9px; border-radius: var(--radius);
   font: 600 10px var(--f-body); letter-spacing: .12em; cursor: pointer;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
 }
-.ico-btn:hover:not([disabled]) { color: var(--paper); border-color: var(--paper-3); }
+.ico-btn:active:not([disabled]) {
+  color: var(--paper);
+  border-color: var(--paper-3);
+}
 .ico-btn[disabled] { opacity: .4; cursor: not-allowed; }
 .nc-fault {
   margin: 4px 0 2px; padding: 5px 8px; border-radius: var(--radius);
@@ -559,9 +584,7 @@ body:not(.is-dev) .ai-block     { display: none; }
   border: 1px solid rgba(214,38,49,.4); border-radius: var(--radius);
   font: 700 11px var(--f-body); letter-spacing: .04em; cursor: pointer;
 }
-.factory-reset-btn:hover { background: var(--blood-deep); color: var(--paper); border-color: var(--blood); }
 .dlg-btn.danger { color: var(--blood-bright); border-color: rgba(214,38,49,.5); }
-.dlg-btn.danger:hover { background: var(--blood-deep); color: var(--paper); border-color: var(--blood); }
 
 .tour-blocker { position: fixed; inset: 0; z-index: 9997; }
 .tour-ring {
@@ -590,7 +613,6 @@ body:not(.is-dev) .ai-block     { display: none; }
 .tour-btns { display: inline-flex; gap: 6px; }
 .tour-next { background: var(--blood) !important; color: var(--paper) !important; border-color: var(--blood) !important; }
 .tour-skip { color: var(--paper-3) !important; background: transparent !important; border-color: transparent !important; }
-.tour-nav button:hover { border-color: var(--paper-3); }
 
 .tour-progress { height: 3px; background: var(--rule-2); border-radius: 2px; overflow: hidden; margin-bottom: 10px; }
 .tour-progress i { display: block; height: 100%; background: var(--blood-bright); transition: width .25s ease; }
@@ -602,7 +624,14 @@ body:not(.is-dev) .ai-block     { display: none; }
    describing or gets pushed off a 360 px screen. Pinning it to the bottom keeps
    it thumb-reachable, keeps the highlight visible above it, and makes the layout
    impossible to get wrong. tour.js scrolls the target into the strip above. */
-body.tour-open { touch-action: none; }
+/* Lock the page behind the sheet WITHOUT disabling touch input.
+   This used to be `touch-action: none`, which does stop the scroll — and also
+   stops every tap on the page, including the tour's own ปิด button. A phone was
+   then completely dead to touch until the page was reloaded, while a mouse on the
+   same page kept working, because touch-action does not affect pointer input from
+   a mouse. overflow + overscroll-behavior lock the scroll and leave taps alone;
+   the blocker's own touchmove handler covers iOS rubber-banding. */
+body.tour-open { overflow: hidden; overscroll-behavior: none; }
 /* Runway so the LAST elements on the page can still be scrolled up into the strip
    above the sheet. Without it the final steps sit at the document bottom, i.e.
    permanently behind the sheet, however far you scroll. */
@@ -711,30 +740,38 @@ body.tour-mobile { padding-bottom: 60vh; }
 }
 
 .rec-btn {
-  position: absolute; left: 50%; bottom: -16px;
-  transform: translateX(-50%);
-  display: inline-flex; align-items: center; gap: 8px;
-  padding: 9px 22px;
+  /* Own row, full width, big hit area. Was a small pill hung over the dial with
+     position:absolute — a thumb that missed by a few px hit the SVG dial behind
+     it (which starts the round clock, not the recording), so REC felt dead on a
+     phone. touch-action:manipulation kills the double-tap-zoom delay so a single
+     tap registers instantly. */
+  display: flex; align-items: center; justify-content: center; gap: 10px;
+  width: 100%;
+  margin-top: 14px;
+  min-height: 54px;
+  padding: 14px 22px;
   background: var(--blood);
   color: var(--paper);
   border: 1px solid var(--blood-bright);
-  border-radius: 2px;
-  font: 700 13px/1 var(--f-display);
-  letter-spacing: .18em;
+  border-radius: var(--radius);
+  font: 700 15px/1 var(--f-display);
+  letter-spacing: .16em;
   cursor: pointer;
-  box-shadow: 0 6px 0 -3px rgba(0,0,0,.6);
-  transition: transform .1s, background .2s;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+  box-shadow: 0 4px 0 -1px rgba(0,0,0,.5);
+  transition: transform .1s, background .2s, box-shadow .1s;
 }
-.rec-btn:hover { background: var(--blood-bright); }
-.rec-btn:active { transform: translateX(-50%) translateY(2px); box-shadow: none; }
+.rec-btn:active { transform: translateY(2px); box-shadow: none; }
 .rec-btn .rec-dot {
-  width: 10px; height: 10px; border-radius: 50%; background: var(--paper);
+  width: 12px; height: 12px; border-radius: 50%; background: var(--paper);
+  box-shadow: 0 0 0 4px rgba(255,255,255,.15);
 }
 .rec-btn.is-rec { background: var(--ink-3); border-color: var(--blood); }
 .rec-btn.is-rec .rec-dot { animation: pulseDot 1s ease-in-out infinite; }
 
 .dial-controls {
-  margin-top: 24px;
+  margin-top: 12px;
   display: flex; align-items: center; justify-content: center; gap: 8px;
   flex-wrap: wrap;
 }
@@ -745,7 +782,6 @@ body.tour-mobile { padding-bottom: 60vh; }
   font: 600 10.5px/1 var(--f-body); letter-spacing: .14em;
   cursor: pointer;
 }
-.tbtn:hover { color: var(--paper); border-color: var(--paper-3); }
 .check { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: var(--paper-3); }
 .check input { accent-color: var(--blood); }
 
@@ -799,7 +835,6 @@ body.tour-mobile { padding-bottom: 60vh; }
 .zone.is-hit circle      { fill: var(--blood); stroke: var(--blood-bright); }
 .zone.is-hit text        { fill: var(--paper); }
 .zone { cursor: pointer; }
-.zone:hover circle { stroke: var(--paper); }
 
 /* MIXER (VU meters per slot) */
 .mixer { display: flex; flex-direction: column; gap: 10px; }
@@ -917,10 +952,8 @@ body.tour-mobile { padding-bottom: 60vh; }
   font: 600 10.5px var(--f-body); letter-spacing: .14em;
   cursor: pointer;
 }
-.chip:hover { color: var(--paper); border-color: var(--paper-3); }
 .chip.chip-on { background: var(--paper); color: var(--ink-0); border-color: var(--paper); }
 .chip.ghost { border-color: transparent; color: var(--paper-3); }
-.chip.ghost:hover { color: var(--blood-bright); }
 
 .table-wrap {
   overflow: auto;
@@ -946,7 +979,6 @@ body.tour-mobile { padding-bottom: 60vh; }
   color: var(--paper-2);
 }
 .strike-table tr.new td { animation: rowFlash 1s ease-out; }
-.strike-table tr:hover td { background: var(--ink-3); color: var(--paper); }
 .strike-table .num { text-align: right; }
 .strike-table .type-cell { color: var(--paper); }
 
@@ -1009,7 +1041,6 @@ body.tour-mobile { padding-bottom: 60vh; }
   cursor: pointer;
   border-radius: 2px;
 }
-.tab:hover { color: var(--paper); }
 .tab.tab-on { background: var(--blood); color: var(--paper); }
 
 .tabpane { display: none; }
@@ -1102,8 +1133,51 @@ body.tour-mobile { padding-bottom: 60vh; }
   font: 600 10px var(--f-body); letter-spacing: .12em;
   cursor: pointer; border-radius: 2px;
 }
-.lib-row .ico-btn:hover { color: var(--paper); border-color: var(--paper-3); }
-.lib-row .ico-btn.danger:hover { color: var(--blood-bright); border-color: var(--blood); }
+
+/* RECENT RECORDINGS (home) */
+.recent-list { display: flex; flex-direction: column; gap: 6px; }
+.recent-row {
+  display: grid; grid-template-columns: auto 1fr auto; gap: 10px; align-items: center;
+  width: 100%; text-align: left;
+  padding: 9px 11px; min-height: 46px;
+  background: var(--ink-1); border: 1px solid var(--rule);
+  border-left: 2px solid var(--blood); border-radius: var(--radius);
+  cursor: pointer; touch-action: manipulation;
+  transition: background .15s, border-color .15s;
+}
+.recent-row:active { background: var(--ink-3); }
+.recent-play {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 26px; height: 26px; border-radius: 50%;
+  background: var(--blood-deep); color: var(--paper); font-size: 11px;
+}
+.recent-info { display: flex; flex-direction: column; min-width: 0; }
+.recent-id   { font: 600 12px var(--f-mono); color: var(--paper); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.recent-meta { font-size: 10px; color: var(--paper-3); letter-spacing: .03em; margin-top: 2px; }
+.recent-go   { font: 700 10px var(--f-body); letter-spacing: .1em; color: var(--paper-3); white-space: nowrap; }
+
+/* SCORING EXPLAINER modal */
+.help-lead { font-size: 13.5px; line-height: 1.6; color: var(--paper-2); margin: 4px 0 12px; }
+.help-formula {
+  background: var(--ink-1); border: 1px solid var(--rule-2); border-radius: var(--radius);
+  padding: 10px 12px; text-align: center; color: var(--paper);
+  font-size: 14px; letter-spacing: .02em; margin-bottom: 12px;
+}
+.help-formula sub { font-size: 10px; color: var(--paper-3); }
+.help-list { margin: 0 0 12px; padding-left: 18px; color: var(--paper-2); font-size: 12.5px; line-height: 1.7; }
+.help-list b { color: var(--paper); }
+.help-scale { margin-bottom: 12px; }
+.help-scale td { font-size: 12.5px; }
+.help-note { font-size: 12.5px; line-height: 1.6; color: var(--paper-2); margin: 8px 0; }
+.help-note b { color: var(--paper); }
+.help-tiers { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
+.help-tier {
+  padding: 4px 10px; border-radius: 999px; font: 700 11px var(--f-body); letter-spacing: .04em;
+  border: 1px solid var(--rule-2);
+}
+.help-tier.t-hi  { color: var(--ok, #4ea36b); border-color: rgba(78,163,107,.5); }
+.help-tier.t-mid { color: var(--warn, #c79a3a); border-color: rgba(199,154,58,.5); }
+.help-tier.t-lo  { color: var(--blood-bright); border-color: rgba(214,38,49,.5); }
 
 /* SYSTEM */
 .kv-table { width: 100%; border-collapse: collapse; font-size: 11.5px; }
@@ -1191,9 +1265,11 @@ body.tour-mobile { padding-bottom: 60vh; }
   .layout {
     grid-template-columns: 1fr;
   }
-  .rail-left { order: 1; }
-  .stage { order: 2; }
-  .rail-right { order: 3; }
+  /* one column: the live read first, then the clock, then everything else */
+  .hero-block { grid-column: auto; grid-row: auto; order: 0; }
+  .rail-left  { grid-column: auto; grid-row: auto; order: 1; }
+  .stage      { grid-column: auto; grid-row: auto; order: 2; }
+  .rail-right { grid-column: auto; grid-row: auto; order: 3; }
   .stage-top { grid-template-columns: 1fr; }
 }
 
@@ -1212,7 +1288,6 @@ input:focus-visible, select:focus-visible, button:focus-visible {
 ::-webkit-scrollbar { width: 8px; height: 8px; }
 ::-webkit-scrollbar-track { background: var(--ink-1); }
 ::-webkit-scrollbar-thumb { background: var(--rule-2); border-radius: 0; }
-::-webkit-scrollbar-thumb:hover { background: var(--paper-3); }
 
 /* ════════════════════════════════════════════════════════════════
    ROUND 2 ADDITIONS
@@ -1230,7 +1305,6 @@ input:focus-visible, select:focus-visible, button:focus-visible {
   font: 600 13px var(--f-body);
   padding: 0;
 }
-.icon-btn:hover { color: var(--paper); border-color: var(--paper-3); }
 .icon-btn.is-on { color: var(--paper); border-color: var(--paper); background: var(--ink-3); }
 
 /* segment toggle (LIVE / HEATMAP) */
@@ -1247,7 +1321,6 @@ input:focus-visible, select:focus-visible, button:focus-visible {
   font: 600 10px var(--f-body); letter-spacing: .14em;
   cursor: pointer; border-radius: 1px;
 }
-.seg-btn:hover { color: var(--paper); }
 .seg-btn.seg-on { background: var(--paper); color: var(--ink-0); }
 
 /* small modifiers */
@@ -1346,7 +1419,6 @@ input:focus-visible, select:focus-visible, button:focus-visible {
 .marker-list .mk-del {
   background: transparent; border: 0; color: var(--paper-3); cursor: pointer; padding: 0 4px;
 }
-.marker-list .mk-del:hover { color: var(--blood-bright); }
 
 /* ──────── timeline strip ──────── */
 .timeline {
@@ -1426,7 +1498,6 @@ input:focus-visible, select:focus-visible, button:focus-visible {
 .dlg-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }
 .dlg-title { font: 700 18px var(--f-display); letter-spacing: .04em; }
 .dlg-x { background: transparent; border: 0; color: var(--paper-3); cursor: pointer; font-size: 18px; }
-.dlg-x:hover { color: var(--paper); }
 .dlg-row { display: grid; grid-template-columns: 120px 1fr; gap: 10px; align-items: center; margin: 10px 0; }
 .dlg-row label { font: 600 10.5px var(--f-body); letter-spacing: .14em; color: var(--paper-3); }
 .dlg-row input, .dlg-row select {
@@ -1444,8 +1515,6 @@ input:focus-visible, select:focus-visible, button:focus-visible {
   font: 600 11px var(--f-body); letter-spacing: .14em; border-radius: 2px;
 }
 .dlg-btn.primary { background: var(--blood); border-color: var(--blood-bright); }
-.dlg-btn:hover { border-color: var(--paper); }
-.dlg-btn.primary:hover { background: var(--blood-bright); }
 
 /* compare dialog table */
 .cmp-table { width: 100%; border-collapse: collapse; font-family: var(--f-mono); font-size: 12px; }
@@ -1560,7 +1629,6 @@ input:focus-visible, select:focus-visible, button:focus-visible {
   cursor: pointer;
   transition: background .12s, transform .06s;
 }
-.cal-all-btn:hover  { background: var(--blood-bright); }
 .cal-all-btn:active { transform: translateY(1px); }
 
 .cal-targets {
@@ -1706,14 +1774,12 @@ body.is-fs .dial-clock { font-size: 56px; }
   font: 700 12px/1 var(--f-display); letter-spacing: .12em;
   cursor: pointer; transition: background .12s ease, border-color .12s ease;
 }
-.ai-upload-btn:hover { background: var(--ink-2); border-color: var(--teal-on); }
 .ai-clear-btn {
   flex: 0 0 68px;
   border: 1px solid var(--rule-2); border-radius: var(--radius);
   background: var(--ink-3); color: var(--paper-3);
   font: 700 11px/1 var(--f-display); letter-spacing: .1em; cursor: pointer;
 }
-.ai-clear-btn:hover:not(:disabled) { color: var(--blood-bright); border-color: rgba(214,38,49,.5); }
 .ai-clear-btn:disabled { opacity: .4; cursor: default; }
 
 .ai-status {
@@ -1733,7 +1799,6 @@ body.is-fs .dial-clock { font-size: 56px; }
   background: var(--ink-1); cursor: pointer;
   transition: border-color .12s ease, background .12s ease;
 }
-.ai-model-row:hover { border-color: rgba(74,194,148,.4); background: var(--ink-2); }
 .ai-model-row.active { border-color: rgba(74,194,148,.55); background: rgba(74,194,148,.08); }
 .ai-model-dot {
   flex: 0 0 auto; width: 12px; height: 12px; border-radius: 50%;
@@ -1755,7 +1820,6 @@ body.is-fs .dial-clock { font-size: 56px; }
   flex: 0 0 auto; border: none; background: none; cursor: pointer;
   color: var(--paper-3); font-size: 13px; padding: 2px 4px; line-height: 1;
 }
-.ai-model-del:hover { color: var(--blood-bright); }
 .ai-models-empty {
   padding: 8px 10px; text-align: center;
   font: 500 10.5px/1.4 var(--f-body); color: var(--paper-3);
@@ -1826,11 +1890,9 @@ body.is-fs .dial-clock { font-size: 56px; }
   background: var(--ink-2); color: var(--paper-2);
   font: 600 11px/1.3 var(--f-body); cursor: pointer;
 }
-.setup-relaunch:hover { border-color: var(--teal-on); color: var(--paper); }
 .node-card.offline { opacity: .7; border-left: 3px solid var(--amber); }
 .node-card.offline .nc-age { color: var(--amber); }
 .ico-btn.danger { color: var(--blood-bright); border-color: rgba(214,38,49,.4); }
-.ico-btn.danger:hover { background: var(--blood-deep); color: var(--paper); }
 
 /* ════════ FIRST-RUN SETUP WIZARD ════════ */
 .setup-overlay {
@@ -1842,6 +1904,14 @@ body.is-fs .dial-clock { font-size: 56px; }
   padding: max(16px, env(safe-area-inset-top)) 16px max(16px, env(safe-area-inset-bottom));
   overflow-y: auto; -webkit-overflow-scrolling: touch;
   background: rgba(4,4,7,.82); backdrop-filter: blur(3px);
+}
+.setup-close {
+  position: fixed; top: max(12px, env(safe-area-inset-top)); right: 14px; z-index: 1;
+  width: 44px; height: 44px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--ink-2); color: var(--paper); border: 1px solid var(--rule-2);
+  font-size: 18px; cursor: pointer; touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
 }
 .setup-card {
   margin: auto;
@@ -1868,9 +1938,7 @@ body.is-fs .dial-clock { font-size: 56px; }
   background: var(--ink-3); color: var(--paper); cursor: pointer;
   font: 700 12px/1 var(--f-display); letter-spacing: .1em; min-height: 44px;
 }
-.setup-btn:hover { border-color: var(--paper-3); background: var(--ink-2); }
 .setup-btn.primary { background: var(--blood); border-color: var(--blood); color: #fff; }
-.setup-btn.primary:hover { background: var(--blood-bright); }
 .setup-btn.ghost { background: transparent; color: var(--paper-3); }
 @media (max-width: 460px) { .setup-card { padding: 20px 16px; } .setup-title { font-size: 22px; } }
 
@@ -1908,7 +1976,9 @@ body.is-fs .dial-clock { font-size: 56px; }
   .icon-btn { width: 40px; height: 40px; font-size: 16px; }
   .tab { padding: 12px 10px; font-size: 13px; }
   .chip, .seg-btn, .tbtn { min-height: 34px; }
-  .logger-btn, .ai-upload-btn, .ai-clear-btn, .rec-btn { min-height: 46px; }
+  .logger-btn, .ai-upload-btn, .ai-clear-btn { min-height: 46px; }
+  /* the primary action gets the biggest target on the page */
+  .rec-btn { min-height: 56px; font-size: 16px; }
   select, input[type="text"], input[type="search"], .athlete-input {
     min-height: 42px; font-size: 16px;   /* 16px stops iOS zoom-on-focus */
   }
@@ -1993,3 +2063,288 @@ body.is-fs .dial-clock { font-size: 56px; }
 .rp-row-type.is-ai i { font-style: normal; opacity: .6; font-size: 9.5px; }
 .rp-now-type.is-ai { color: var(--teal-on); }
 .rp-now-ai { font: 700 11px var(--f-mono); color: var(--teal-on); }
+
+/* ════════ โหมดนักพัฒนา ════════
+   Everything technical is hidden until the switch in the ระบบ tab is on. A coach
+   running a session should not be able to reach the detector thresholds, the
+   radio counters, or the factory reset by accident — none of them help anyone
+   train, and two of them break the rig. */
+[data-dev] { display: none !important; }
+body.is-dev [data-dev] { display: revert !important; }
+
+/* ════════ ท่าล่าสุด · HERO ════════ */
+.hero-block {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr);
+  grid-template-areas: "main score" "facts facts";
+  gap: 14px 18px;
+  align-items: center;
+  margin-bottom: 12px;
+}
+.hero-main  { grid-area: main;  min-width: 0; }
+.hero-score { grid-area: score; min-width: 0; }
+.hero-facts { grid-area: facts; }
+
+.hero-lbl {
+  font: 600 10px var(--f-body); letter-spacing: .18em;
+  color: var(--paper-3); margin-bottom: 4px;
+}
+.hero-tech {
+  font: 400 clamp(30px, 7vw, 52px)/1.05 var(--f-display);
+  letter-spacing: .02em; color: var(--paper);
+  overflow-wrap: anywhere;
+}
+.hero-tech.unnamed { color: var(--paper-3); }
+.hero-sub {
+  font: 500 11px var(--f-mono); color: var(--paper-3); margin-top: 2px;
+  min-height: 14px;
+}
+.hero-combo {
+  display: inline-flex; align-items: center; gap: 5px;
+  margin-top: 7px; padding: 3px 10px;
+  background: var(--blood-deep); color: var(--paper);
+  border: 1px solid var(--blood-bright); border-radius: 999px;
+  font: 700 12px var(--f-body); letter-spacing: .06em;
+  animation: comboPop .18s ease-out;
+}
+.hero-combo b { font-family: var(--f-display); font-size: 15px; letter-spacing: .04em; }
+.hero-combo[hidden] { display: none; }
+@keyframes comboPop { from { transform: scale(.7); opacity: 0 } to { transform: none; opacity: 1 } }
+.hero-score-val { font: 600 clamp(26px, 6vw, 40px)/1 var(--f-mono); color: var(--paper); }
+.hero-score-val i { font: 500 12px var(--f-mono); color: var(--paper-3); font-style: normal; }
+.hero-score-track {
+  height: 7px; background: var(--ink-3); border-radius: 2px;
+  overflow: hidden; margin-top: 7px;
+}
+.hero-score-track span { display: block; height: 100%; width: 0; transition: width .18s ease; }
+.hero-score-track .t-hi  { background: var(--ok, #4ea36b); }
+.hero-score-track .t-mid { background: var(--warn, #c79a3a); }
+.hero-score-track .t-lo  { background: var(--rule); }
+
+.hero-facts {
+  display: grid; grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px; border-top: 1px solid var(--rule); padding-top: 10px;
+}
+.hero-fact { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.hero-fact span { font: 600 9.5px var(--f-body); letter-spacing: .14em; color: var(--paper-3); }
+.hero-fact b { font: 600 14px var(--f-mono); color: var(--paper-2); }
+
+/* ════════ นับท่าที่ออก ════════ */
+/* name · bar · count · average score — the score column is new, so the grid has
+   to grow with it or every row wraps onto two lines. */
+.dist-row { grid-template-columns: 74px 1fr 26px 32px; align-items: center; gap: 8px; }
+.dist-name { font: 600 12px var(--f-body); color: var(--paper-2); }
+.dist-cnt  { min-width: 26px; text-align: right; color: var(--paper); font-weight: 700; }
+.dist-score {
+  min-width: 30px; text-align: right; font-size: 11px; font-weight: 700;
+  padding: 1px 5px; border-radius: 2px;
+}
+.dist-score.t-hi  { color: var(--ok, #4ea36b); }
+.dist-score.t-mid { color: var(--warn, #c79a3a); }
+.dist-score.t-lo  { color: var(--paper-3); }
+.dist-unnamed { margin-top: 6px; }
+
+/* ════════ โทรศัพท์ที่ต่อกับ AP ════════
+   The rig serves this over its own SoftAP, so the phone IS the normal way to use
+   it — the desktop three-column layout is the exception, not the default. */
+@media (max-width: 760px), (pointer: coarse) {
+  /* Compact enough that the clock is still on screen under it — a coach should
+     not have to scroll between the technique read and the round timer. */
+  .hero-block {
+    grid-template-columns: minmax(0, 1fr) 96px;
+    grid-template-areas: "main score" "facts facts";
+    gap: 8px 12px;
+    padding: 12px 14px;
+  }
+  .hero-tech { font-size: clamp(26px, 9vw, 38px); }
+  .hero-lbl { margin-bottom: 2px; }
+  .hero-score { text-align: right; }
+  .hero-score-val { font-size: 28px; }
+  .hero-score-track { margin-top: 5px; }
+  .hero-facts { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; padding-top: 8px; }
+  .hero-fact span { font-size: 8.5px; letter-spacing: .1em; }
+  .hero-fact b { font-size: 12px; }
+  /* Touch targets: a gloved hand cannot hit a 24 px chip. */
+  .tbtn, .chip, .seg-btn, .tab { min-height: 38px; }
+  .strike-table { font-size: 11px; }
+  .strike-table th, .strike-table td { padding: 7px 6px; }
+  .strike-table .sc-col { width: 78px; }
+}
+
+
+/* ════════ นาฬิกาจับเวลา ════════
+   Work and rest have to be distinguishable across a gym, from a phone taped to a
+   post — a coach glances up mid-combination and must not have to read the word.
+   Red is working, green is resting. */
+/* Red ring is a working round, amber is rest — the ring colour was already the
+   signal, but the clock stayed white, so at a glance the two phases looked the
+   same. Tint the numerals too. */
+.dial.is-rest .dial-clock, .dial.is-rest .dial-phase { fill: var(--amber); }
+.dial-phase { letter-spacing: .12em; }
+
+/* ประวัติการต่อยขึ้นก่อนบนจอมือถือ — the thing a coach opens the page to check */
+@media (max-width: 1080px) {
+  .stage { display: flex; flex-direction: column; }
+  .strike-log     { order: 1; }
+  .stage-top      { order: 2; }
+  .scorecard-block{ order: 3; }
+}
+
+/* ════════ เป้าสัมผัสขั้นต่ำ ════════
+   Audited on a 375 px viewport: no control was overlapped by anything, but many
+   were well under the 44 px an average fingertip needs — checkboxes worst at
+   13×13. A mouse hits 13 px every time; a thumb hits it almost never, which is
+   what "กดผ่านนิ้วไม่ได้ แต่เมาส์ได้" looks like from the outside.
+
+   `pointer: coarse` covers phone and iPad and never a mouse, so a desktop layout
+   is untouched. */
+@media (max-width: 760px), (pointer: coarse) {
+  .icon-btn, .tbtn, .chip, .seg-btn, .tab, .ico-btn, .cal-all-btn,
+  .setup-open-btn, #btnOpenSetup, #btnRescanNodes, #btnCalAll,
+  select, input[type="text"], input[type="search"], .athlete-input { min-height: 44px; }
+  .tbtn, .chip, .seg-btn { min-width: 44px; }
+
+  /* A bare 13 px checkbox is unhittable. Scale the box itself and give the whole
+     label a real row so a tap anywhere on the words counts. */
+  input[type="checkbox"] { width: 22px; height: 22px; }
+  .check, .ai-enable, label:has(> input[type="checkbox"]) {
+    display: flex; align-items: center; gap: 10px;
+    min-height: 44px; cursor: pointer;
+  }
+  /* The switch in the ระบบ tab is a styled track, not a native box. */
+  .switch { min-width: 52px; min-height: 44px; display: flex; align-items: center; }
+  .switch-track { width: 46px; height: 26px; }
+  .switch-thumb { width: 20px; height: 20px; }
+  .switch input:checked + .switch-track .switch-thumb { transform: translateX(20px); }
+}
+
+/* ════════ :hover เฉพาะอุปกรณ์ที่ชี้ด้วยเมาส์/แทร็กแพดแท้จริง ════════
+   On iOS and iPadOS (which reports hover:hover + pointer:fine due to trackpad support),
+   the FIRST tap on an element with :hover styling is spent applying that hover state
+   — the tap produces no click, and the control just lights up. Adding (not (any-pointer: coarse))
+   ensures iPads and touchscreens do not get stuck in hover state on single finger tap. */
+@media (hover: hover) and (pointer: fine) and (not (any-pointer: coarse)) {
+  .logger-select-wrap select:hover { border-color: var(--paper-faint); }
+  .logger-btn:hover { border-color: var(--paper-faint); background: var(--ink-2); }
+  .logger-btn-export:hover { color: var(--teal-on); }
+  .tour-launch:hover { background: var(--ink-3); border-color: var(--gold); }
+  .rp-btn:hover { border-color: var(--paper-3); }
+  .rp-row:hover { background: var(--ink-2); }
+  .ico-btn.primary:hover { background: var(--blood); }
+  .recovery-btn:hover:not(:disabled) { background: var(--ink-3); border-color: var(--gold); color: var(--paper); }
+  .ico-btn:hover:not([disabled]) { color: var(--paper); border-color: var(--paper-3); }
+  .factory-reset-btn:hover { background: var(--blood-deep); color: var(--paper); border-color: var(--blood); }
+  .dlg-btn.danger:hover { background: var(--blood-deep); color: var(--paper); border-color: var(--blood); }
+  .tour-nav button:hover { border-color: var(--paper-3); }
+  .rec-btn:hover { background: var(--blood-bright); }
+  .tbtn:hover { color: var(--paper); border-color: var(--paper-3); }
+  .zone:hover circle { stroke: var(--paper); }
+  .chip:hover { color: var(--paper); border-color: var(--paper-3); }
+  .chip.ghost:hover { color: var(--blood-bright); }
+  .strike-table tr:hover td { background: var(--ink-3); color: var(--paper); }
+  .tab:hover { color: var(--paper); }
+  .lib-row .ico-btn:hover { color: var(--paper); border-color: var(--paper-3); }
+  .lib-row .ico-btn.danger:hover { color: var(--blood-bright); border-color: var(--blood); }
+  .recent-row:hover { background: var(--ink-2); border-color: var(--rule-2); }
+  ::-webkit-scrollbar-thumb:hover { background: var(--paper-3); }
+  .icon-btn:hover { color: var(--paper); border-color: var(--paper-3); }
+  .seg-btn:hover { color: var(--paper); }
+  .marker-list .mk-del:hover { color: var(--blood-bright); }
+  .dlg-x:hover { color: var(--paper); }
+  .dlg-btn:hover { border-color: var(--paper); }
+  .dlg-btn.primary:hover { background: var(--blood-bright); }
+  .cal-all-btn:hover  { background: var(--blood-bright); }
+  .ai-upload-btn:hover { background: var(--ink-2); border-color: var(--teal-on); }
+  .ai-clear-btn:hover:not(:disabled) { color: var(--blood-bright); border-color: rgba(214,38,49,.5); }
+  .ai-model-row:hover { border-color: rgba(74,194,148,.4); background: var(--ink-2); }
+  .ai-model-del:hover { color: var(--blood-bright); }
+  .setup-relaunch:hover { border-color: var(--teal-on); color: var(--paper); }
+  .ico-btn.danger:hover { background: var(--blood-deep); color: var(--paper); }
+  .setup-close:hover { background: var(--ink-3); border-color: var(--paper-3); }
+  .setup-btn:hover { border-color: var(--paper-3); background: var(--ink-2); }
+  .setup-btn.primary:hover { background: var(--blood-bright); }
+}
+
+/* ════════ คลังข้อมูลเทรน ════════ */
+.train-bank { display: flex; flex-direction: column; gap: 5px; margin-top: 6px; }
+.train-row {
+  display: grid; grid-template-columns: 92px 1fr 46px;
+  align-items: center; gap: 8px;
+  font: 500 11px var(--f-body);
+}
+.train-name { color: var(--paper-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.train-bar { height: 6px; background: var(--ink-3); border-radius: 2px; overflow: hidden; }
+.train-bar i { display: block; height: 100%; background: var(--blood); }
+.train-row.done .train-bar i { background: var(--ok, #4ea36b); }
+.train-n { text-align: right; color: var(--paper-3); font-size: 10.5px; }
+.train-row.done .train-n { color: var(--ok, #4ea36b); font-weight: 700; }
+
+/* ════════ PHONE MOTION CAPTURE ════════
+   The video never decides which limb struck: its job is only to make the IMU
+   event easier to coach by showing the same-side 3-D joint angles. */
+.hero-facts { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+
+.mocap-pane { min-width: 0; }
+.mc-status {
+  padding: 3px 6px; border: 1px solid var(--rule-2); border-radius: 2px;
+  color: var(--paper-3); font-size: 10px; letter-spacing: .08em;
+}
+.mc-status.is-running { color: var(--teal-on); border-color: rgba(74,194,148,.55); }
+.mc-status.is-warn, .mc-status.is-error { color: var(--amber); border-color: rgba(240,160,75,.55); }
+.mc-status[data-state="running"] { color: var(--teal-on); border-color: rgba(74,194,148,.55); }
+.mc-status[data-state="loading"], .mc-status[data-state="unavailable"], .mc-status[data-state="error"] {
+  color: var(--amber); border-color: rgba(240,160,75,.55);
+}
+.mc-hint { margin: 10px 0; color: var(--paper-2); font-size: 12px; line-height: 1.55; }
+.mc-controls { display: flex; align-items: end; gap: 8px; margin: 10px 0 12px; }
+.mc-facing { flex: 1 1 auto; min-width: 0; }
+.mc-facing select { width: 100%; }
+.mc-btn {
+  min-height: 34px; padding: 7px 10px; border: 1px solid var(--rule-2);
+  border-radius: var(--radius); background: var(--ink-3); color: var(--paper-2);
+  cursor: pointer; font: 700 11px var(--f-body); letter-spacing: .06em;
+  white-space: nowrap;
+}
+.mc-btn:disabled { opacity: .45; cursor: not-allowed; }
+.mc-start { color: #fff; background: var(--blood-deep); border-color: var(--blood); }
+.mc-stage {
+  position: relative; isolation: isolate; width: 100%; aspect-ratio: 16 / 10;
+  overflow: hidden; background: #050507; border: 1px solid var(--rule); border-radius: var(--radius);
+}
+.mc-stage video, .mc-stage canvas {
+  position: absolute; inset: 0; display: block; width: 100%; height: 100%;
+  object-fit: cover;
+}
+.mc-stage video { background: #050507; }
+.mc-stage canvas { pointer-events: none; }
+/* Mirroring is a presentation choice only. MediaPipe landmark names still refer
+   to athlete-left/right, and fusion uses the IMU slot rather than screen x. */
+.mc-stage.is-mirrored video, .mc-stage.is-mirrored canvas { transform: scaleX(-1); }
+.mc-empty {
+  position: absolute; inset: 0; z-index: 2; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: 4px; padding: 20px; text-align: center;
+  background: linear-gradient(135deg, rgba(13,13,17,.96), rgba(7,7,10,.84));
+  color: var(--paper-2); font-size: 12px;
+}
+.mc-empty b { color: var(--paper); font-size: 14px; }
+.mc-empty span { color: var(--paper-3); }
+.mc-stage.is-running .mc-empty { display: none; }
+.mc-readout {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 1px; margin-top: 10px;
+  background: var(--rule); border: 1px solid var(--rule);
+}
+.mc-readout > div { min-width: 0; padding: 8px 9px; background: var(--ink-1); }
+.mc-readout .mc-wide { grid-column: span 2; }
+.mc-readout span { display: block; color: var(--paper-3); font: 600 9px var(--f-body); letter-spacing: .12em; }
+.mc-readout b { display: block; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--paper-2); font-size: 11px; }
+.mc-note { margin: 10px 0 0; line-height: 1.55; }
+
+@media (max-width: 760px), (pointer: coarse) {
+  .tabs { gap: 1px; }
+  .tab { min-width: 0; padding-inline: 5px; font-size: 10px; letter-spacing: .08em; }
+  .hero-facts { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .mc-controls { align-items: stretch; flex-wrap: wrap; }
+  .mc-facing { flex: 1 1 100%; }
+  .mc-btn { flex: 1 1 0; min-height: 44px; }
+  .mc-stage { aspect-ratio: 4 / 3; }
+}

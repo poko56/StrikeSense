@@ -40,7 +40,22 @@ matplotlib.use("Agg")  # headless — save plots to file, no GUI
 import matplotlib.pyplot as plt
 
 # ─────────────────────────── hyper-parameters ───────────────────────────
-TIME_STEPS = 50     # window length  (50 samples @400 Hz = 125 ms)
+# Window shape, chosen by measurement — see tune_window.py. Mean recall over the
+# nine techniques on the held-out split, same data, same seed:
+#
+#     50 + 0     77.0%     the original: 125 ms ending at the impact
+#    160 + 0     81.0%     longer, still nothing after the impact
+#    200 + 0     83.6%
+#    160 + 64    90.4%     ← in use  (92.1% on a repeat run)
+#
+# The follow-through is what carries it. A Cross and a Jab approach almost
+# identically at the wrist and separate in how the body turns THROUGH the strike;
+# with the window ending at the peak the model never saw that, and Cross sat at
+# 78.7%. Including 160 ms of follow-through took it to ~97%, and Uppercut from
+# 77.1% to ~95%. It costs 160 ms of extra latency before a strike gets its name,
+# which a session log can afford — the strike itself is logged immediately.
+TIME_STEPS = 160    # window length (160 samples @400 Hz = 400 ms)
+POST_PEAK  = 64     # samples of follow-through kept AFTER the impact (160 ms)
 STEP_SIZE  = 10     # window hop (dense overlap → more training windows)
 FEATURES   = 6      # ax, ay, az, gx, gy, gz  (slot is NOT a CNN feature; see below)
 EPOCHS     = 120    # early stopping decides the real length
@@ -251,7 +266,7 @@ def make_windows(df: pd.DataFrame):
     for _, seg in df.groupby(["file_id", "slot", "cls"], sort=False):
         feats = seg[FEATURE_COLS].to_numpy(dtype=np.float32)
         cls   = int(seg["cls"].iloc[0])
-        if len(feats) < TIME_STEPS + max(JITTER) + FRAME:
+        if len(feats) < TIME_STEPS + POST_PEAK + max(JITTER) + FRAME:
             continue
         acc = np.sqrt((feats[:, 0:3] ** 2).sum(1))
         rot = np.sqrt((feats[:, 3:6] ** 2).sum(1))
@@ -262,7 +277,7 @@ def make_windows(df: pd.DataFrame):
         for end in _impacts(acc, rot):
             gid += 1
             for j in JITTER:
-                e = end + j
+                e = end + POST_PEAK + j
                 s = e - TIME_STEPS
                 if s < 0 or e > len(feats):
                     continue
@@ -534,6 +549,10 @@ def export_web_model(model, mean, std, names, limbs, min_conf=0.0, physics=None,
             "refractory_ms": float(REFRACTORY_MS),
             "search_ms": float(SEARCH_MS),
             "min_peak_dps": float(MIN_PEAK_DPS),
+            # Samples of follow-through the training windows include after the
+            # impact. The dashboard must wait this long before classifying, or it
+            # hands the model a window ending somewhere the model never saw.
+            "post_peak": int(POST_PEAK),
             "idle_label": IDLE_NAME,
             "move_label": MOVE_NAME,
             # Below this the dashboard reports "ไม่ระบุ" instead of a technique.
@@ -712,20 +731,32 @@ def main():
     non_tech = {names.index(n) for n in (IDLE_NAME, MOVE_NAME) if n in names}
     named    = ~np.isin(va_pred, list(non_tech))   # rows where the model claims a technique
 
+    # Pick the floor that leaves the coach with the most CORRECTLY named strikes,
+    # counting a wrong name as cancelling a right one.
+    #
+    # The previous objective — highest precision subject to answering for 65% of
+    # strikes — optimised the wrong thing. On the current model it chose 0.80,
+    # which names 608 of 880 strikes at 96.4% for 586 correct, while naming
+    # everything gives 872 at 87.4% for 762 correct. Precision per name went up
+    # and 176 strikes that would have been named right came back as "ไม่ระบุ".
+    # A session log with a third of its strikes unnamed is not more trustworthy,
+    # it is less useful.
     min_conf, best = 0.0, None
-    print(f"    {'เกณฑ์':>6} {'ตอบ%':>7} {'ถูก%':>7}")
+    print(f"    {'เกณฑ์':>6} {'ตอบ%':>7} {'ถูก%':>7} {'ถูก':>6} {'ผิด':>6} {'ถูก-ผิด':>8}")
     for thr in [0.0, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]:
         keep = named & (va_conf >= thr)
         if keep.sum() < 20:
             continue
-        prec = float((va_pred[keep] == y_va[keep]).mean())
-        cov  = float(keep.sum() / max(1, named.sum()))
-        print(f"    {thr:>6.2f} {cov*100:>6.1f}% {prec*100:>6.1f}%")
-        # Highest floor that still answers for most real strikes. Abstaining on
-        # more than a third of them would make the feature useless in a session.
-        if cov >= 0.65 and (best is None or prec > best):
-            best, min_conf = prec, thr
-    print(f"    → ใช้เกณฑ์ {min_conf:.2f} (ความแม่นของท่าที่ตอบ {(best or 0)*100:.1f}%)")
+        hit   = int((va_pred[keep] == y_va[keep]).sum())
+        miss  = int(keep.sum()) - hit
+        prec  = hit / max(1, int(keep.sum()))
+        cov   = float(keep.sum() / max(1, named.sum()))
+        net_  = hit - miss
+        print(f"    {thr:>6.2f} {cov*100:>6.1f}% {prec*100:>6.1f}% {hit:>6} {miss:>6} {net_:>8}")
+        if best is None or net_ > best:
+            best, min_conf = net_, thr
+    print(f"    → ใช้เกณฑ์ {min_conf:.2f} (ถูก-ผิด = {best or 0})")
+    print("      หมายเหตุ: แดชบอร์ดตั้งค่าเริ่มต้นเป็น 'ระบุท่าทุกครั้งที่ตี' ซึ่งข้ามเกณฑ์นี้")
 
     print("\nแปลงเป็น TFLite Micro (int8) …")
     export_header(model, X_tr, mean, std, names, out=args.out)

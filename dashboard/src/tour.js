@@ -44,6 +44,13 @@ export function maybeAutoStartTour() {
   if (!persist.get(K.tourSeen, false)) setTimeout(startTour, 600);
 }
 
+// A previous session can only leave these behind if the page was torn down
+// mid-tour. The classes alone lock the page scroll, so clear them before
+// anything else runs rather than shipping a page nobody can scroll.
+if (typeof document !== 'undefined' && !document.querySelector('.tour-blocker')) {
+  document.body?.classList.remove('tour-open', 'tour-mobile');
+}
+
 export function startTour() {
   if (blocker) return;         // already open
   idx = 0;

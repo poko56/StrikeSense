@@ -45,6 +45,7 @@ export const PERSIST_KEYS = {
   compare:        'compare',         // string[] session ids
   devMode:        'devMode',         // bool — reveal AI Training Data Logger
   aiAlwaysName:   'aiAlwaysName',    // bool — name every impact, never "ไม่ระบุ"
+  aiEnabled:      'aiEnabled',       // bool — run live inference when a model is present (default on)
   tourSeen:       'tourSeen',        // bool — onboarding tour completed/skipped
   setupDone:      'setupDone',       // bool — local fallback when the rig is unreachable
 };

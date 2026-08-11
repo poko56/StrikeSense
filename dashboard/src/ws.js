@@ -16,6 +16,7 @@ import { state, scheduleRender } from './state.js';
 import { ingestBatch } from './analyzer.js';
 import { logSensorData } from './logger.js';
 import { logLocal } from './diaglog.js';
+import { createRigClockMapper } from './rigclock.js';
 
 const ACCEL_LSB_PER_G  = 2048;
 const GYRO_LSB_PER_DPS = 16.4;
@@ -33,6 +34,18 @@ let lastRateAt = performance.now();
 
 let reconnectTimer = null;
 let tearingDown = false;
+// Converts Main Node receive timestamps to this page's monotonic clock. It
+// preserves timing between frames inside a coalesced WS message, which is what
+// camera-to-IMU matching needs; see rigclock.js for its uncertainty caveat.
+const rigClock = createRigClockMapper();
+
+// Notified every time the stream comes up. main.js uses it to hold REST until
+// the WSS connection owns one of the rig's two TLS client slots.
+const openListeners = new Set();
+export function onWsOpen(fn) {
+  openListeners.add(fn);
+  return () => openListeners.delete(fn);
+}
 
 export function startWs() {
   if (tearingDown) return;
@@ -44,6 +57,7 @@ export function startWs() {
   // rig's matching socket alive too. Cut it loose before opening the replacement.
   if (state.ws) detach(state.ws, true);
   if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+  rigClock.reset();
 
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
   const host  = (location.hostname === 'localhost' || location.hostname === '127.0.0.1')
@@ -63,6 +77,9 @@ export function startWs() {
     backoff = 400;
     lastPktAt = 0;            // don't let the stall watchdog judge a fresh socket
     scheduleRender();
+    for (const fn of openListeners) {
+      try { fn(); } catch (e) { logLocal('WS', `onWsOpen listener: ${e.message}`); }
+    }
   };
   ws.onclose = (ev) => {
     logLocal('WS', `ปิด code=${ev?.code ?? '?'} clean=${ev?.wasClean ? 'y' : 'n'}${ws !== state.ws ? ' (ตัวที่ถูกแทนแล้ว)' : ''}`);
@@ -140,8 +157,10 @@ function forceReconnect(why) {
 // mobile browsers suspend sockets on lock/background, which showed as flapping.
 function kick() {
   if (!state.ws || state.ws.readyState === WebSocket.CLOSED || state.ws.readyState === WebSocket.CLOSING) {
-    backoff = 400;
-    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+    // Focus/online/pageshow often arrive as a burst on mobile.  Respect an
+    // existing backoff instead of turning one failed TLS handshake into several
+    // immediate reconnects that compete for the rig's two secure client slots.
+    if (reconnectTimer) return;
     tearingDown = false;
     startWs();
   }
@@ -201,22 +220,43 @@ if (typeof document !== 'undefined') {
 // downstream keeps a reference past the ingestBatch() call.
 const _pool = Array.from({ length: MAX_SAMPLES }, () => ({ ax: 0, ay: 0, az: 0, gx: 0, gy: 0, gz: 0 }));
 const _view = [];
+// A WS message holds only a handful of coalesced frames. Reuse descriptor
+// arrays so the timing pre-pass does not put pressure on the phone's GC.
+const _frameOffsets = [];
+const _frameCounts = [];
+const _frameRigTimes = [];
+const _frameTimes = [];
 
 function decodeMessage(buf) {
   const dv = new DataView(buf);
   let off = 0;
+  // All frames in this message crossed the socket together, but their embedded
+  // Main Node timestamps tell us when each was actually received by the rig.
+  const arrivalPerfMs = performance.now();
+  _frameOffsets.length = 0;
+  _frameCounts.length = 0;
+  _frameRigTimes.length = 0;
   while (off + HEADER_BYTES <= dv.byteLength) {
     if (dv.getUint8(off) !== 0x01) break;                 // not a frame — stop
     const n = dv.getUint8(off + 2);
     if (n < 1 || n > MAX_SAMPLES) break;
     const frameLen = HEADER_BYTES + n * SAMPLE_BYTES;
     if (off + frameLen > dv.byteLength) break;            // truncated tail
-    decodeFrame(dv, off, n);
+    _frameOffsets.push(off);
+    _frameCounts.push(n);
+    _frameRigTimes.push(dv.getUint32(off + 8, true));
     off += frameLen;
+  }
+  // Calibrate this whole message before feeding its frames in chronological
+  // order. Otherwise the first ever coalesced message would stamp every frame
+  // at its socket-arrival time rather than retaining 20/40 ms rig spacing.
+  rigClock.mapBatch(_frameRigTimes, arrivalPerfMs, _frameTimes);
+  for (let i = 0; i < _frameOffsets.length; i++) {
+    decodeFrame(dv, _frameOffsets[i], _frameCounts[i], _frameTimes[i]);
   }
 
   byteCounter += dv.byteLength;
-  lastPktAt = performance.now();
+  lastPktAt = arrivalPerfMs;
   if (lastPktAt - lastRateAt >= 1000) {                   // rate counters (sliding 1 s)
     state.measuredHz   = sampleCounter;
     state.measuredKbps = (byteCounter * 8) / 1024;
@@ -224,11 +264,13 @@ function decodeMessage(buf) {
   }
 }
 
-function decodeFrame(dv, off, n) {
+function decodeFrame(dv, off, n, frameAtMs) {
   const slot = dv.getUint8(off + 1);
   const rssi = dv.getInt8(off + 3);
   const seq  = dv.getUint32(off + 4, true);
-  // const recvMs = dv.getUint32(off + 8, true);
+  // The node microsecond timestamp is on a different node clock. The Main Node
+  // receive timestamp is the common clock across all four slots, so use it for
+  // browser-side fusion. (Keep the field in the wire format for future sync.)
   // const nodeUs = dv.getUint32(off + 12, true);
 
   _view.length = n;
@@ -250,5 +292,9 @@ function decodeFrame(dv, off, n) {
   pktCounter++;
   sampleCounter += n;
 
-  ingestBatch({ slot, rssi, mac: null, samples: _view, seq, recvMs: Date.now() });
+  ingestBatch({
+    slot, rssi, mac: null, samples: _view, seq,
+    recvMs: Date.now(),
+    tMs: frameAtMs,
+  });
 }

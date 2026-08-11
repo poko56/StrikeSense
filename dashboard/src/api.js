@@ -5,21 +5,109 @@ const BASE = (location.hostname === 'localhost' || location.hostname === '127.0.
   ? 'http://192.168.4.1'
   : '';
 
+// The rig deliberately has a very small TLS socket budget: one phone needs a
+// WSS stream and exactly one transient HTTPS request.  The ESP HTTPS server
+// reserves three socket entries for itself, so a five-socket configuration has
+// only two client slots.  Keep a single REST lane for the whole secure session;
+// otherwise overlapping polls evict the live WSS connection and look like an
+// OFFLINE/LIVE loop.  Plain-HTTP development keeps the original startup-only
+// serialization so localhost testing stays responsive.
+const IS_SECURE = typeof location !== 'undefined' && location.protocol === 'https:';
+const KEEP_SECURE_REQUESTS_SERIAL = IS_SECURE;
+let initialRequestGate = true;
+
+// On HTTPS the whole lane starts CLOSED.  Only two TLS clients fit, and the
+// live WSS stream has to claim one of them before REST claims the other: a page
+// that sent its bootstrap reads first held the free slot continuously (the
+// ~140 KB /api/model read alone can hold it for tens of seconds) and the WSS
+// handshake was refused for as long as the tab stayed open — the dashboard sat
+// on Offline with `ws=0` on the rig.  main.js opens the lane once WSS is up, or
+// once its grace period expires so a rig without a stream still gets its data.
+let openLane = null;
+let requestTail = IS_SECURE ? new Promise(resolve => { openLane = resolve; }) : Promise.resolve();
+const pendingReads = new Map();
+
+/** Let queued REST run. Safe to call repeatedly; only the first call counts. */
+export function openRequestLane() {
+  const open = openLane;
+  openLane = null;
+  open?.();
+  return requestTail;
+}
+
+// A request that never settles is worse than one that fails: it wedges the
+// one-at-a-time lane until the browser's own socket timeout (minutes), and
+// everything queued behind it — including the bootstrap hand-off — never runs.
+// Every rig call therefore carries its own deadline.
+const REQUEST_TIMEOUT_MS = 15000;
+const MODEL_READ_TIMEOUT_MS = 60000;    // /api/model streams ~140 KB off SD through TLS
+const MODEL_WRITE_TIMEOUT_MS = 120000;  // and an upload writes that back to the card
+
+async function fetchText(url, opts = {}, timeoutMs = REQUEST_TIMEOUT_MS) {
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, { ...opts, signal: ac.signal });
+    // Read the body inside the same deadline. fetch() resolves at headers, so a
+    // response that stops mid-transfer would otherwise stall unbounded.
+    const text = await res.text();
+    return { res, text };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function queueRequest(run, readKey = '') {
+  if (!initialRequestGate && !KEEP_SECURE_REQUESTS_SERIAL) return run();
+  if (readKey && pendingReads.has(readKey)) return pendingReads.get(readKey);
+
+  const queued = requestTail.then(run, run);
+  // Keep the queue live after an unreachable rig/error response.
+  requestTail = queued.catch(() => {});
+  if (readKey) {
+    pendingReads.set(readKey, queued);
+    // Do not let a rejected read create an unhandled promise merely because we
+    // are clearing the single-flight map.
+    queued.then(
+      () => { if (pendingReads.get(readKey) === queued) pendingReads.delete(readKey); },
+      () => { if (pendingReads.get(readKey) === queued) pendingReads.delete(readKey); },
+    );
+  }
+  return queued;
+}
+
+/** Release the startup gate; HTTPS retains its one-request lane afterwards. */
+export function releaseInitialRequestGate() {
+  initialRequestGate = false;
+  return requestTail;
+}
+
 async function json(path, opts) {
   const url = BASE + path;
-  const res = await fetch(url, { headers: { 'content-type': 'application/json' }, ...opts });
-  const t = await res.text();
-  let body = null;
-  try { body = t ? JSON.parse(t) : null; } catch { /* non-JSON error page */ }
-  if (!res.ok) {
-    // Carry the parsed payload on the error: a 409 from /api/session/start ships
-    // the id of the run that is already going, and the caller adopts it.
-    const err = new Error(body?.error || `${res.status} ${res.statusText}`);
-    err.status = res.status;
-    err.body   = body;
-    throw err;
-  }
-  return body;
+  const { timeoutMs = REQUEST_TIMEOUT_MS, ...fetchOpts } = opts || {};
+  const method = String(fetchOpts.method || 'GET').toUpperCase();
+  // Pollers frequently ask the same read before a weak AP has answered.  One
+  // response is enough for every caller, and coalescing prevents a queue that
+  // grows forever during a temporary radio stall.
+  const readKey = method === 'GET' ? `${method} ${url}` : '';
+  return queueRequest(async () => {
+    // Keep the response body inside the startup lane. fetch() resolves at
+    // headers, so releasing this before text() finishes would still overlap
+    // TLS sockets on the small rig.
+    const { res, text: t } = await fetchText(
+      url, { headers: { 'content-type': 'application/json' }, ...fetchOpts }, timeoutMs);
+    let body = null;
+    try { body = t ? JSON.parse(t) : null; } catch { /* non-JSON error page */ }
+    if (!res.ok) {
+      // Carry the parsed payload on the error: a 409 from /api/session/start ships
+      // the id of the run that is already going, and the caller adopts it.
+      const err = new Error(body?.error || `${res.status} ${res.statusText}`);
+      err.status = res.status;
+      err.body   = body;
+      throw err;
+    }
+    return body;
+  }, readKey);
 }
 
 export const api = {
@@ -63,16 +151,18 @@ export const api = {
 
   // ── AI model persisted on the Main Node SD card ──
   // returns the parsed model, or null if none is stored (404)
-  modelGet: async () => {
-    const res = await fetch(BASE + '/api/model', { cache: 'no-store' });
+  modelGet: () => queueRequest(async () => {
+    const { res, text } = await fetchText(
+      BASE + '/api/model', { cache: 'no-store' }, MODEL_READ_TIMEOUT_MS);
     if (res.status === 404) return null;
     if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
-    return res.json();
-  },
+    return text ? JSON.parse(text) : null;
+  }, `GET ${BASE}/api/model`),
   // ── model library: many models on SD, one active ──
   modelsList:    () => json('/api/models'),                        // { active, models:[{name,size}] }
   modelUpload:   (jsonText, name) => json('/api/models?name=' + encodeURIComponent(name || 'model.json'), {
     method: 'POST', headers: { 'content-type': 'application/json' }, body: jsonText,
+    timeoutMs: MODEL_WRITE_TIMEOUT_MS,
   }),
   modelActivate: (name) => json('/api/models/activate?name=' + encodeURIComponent(name), { method: 'POST' }),
   modelRemove:   (name) => json('/api/models?name=' + encodeURIComponent(name), { method: 'DELETE' }),

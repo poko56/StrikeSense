@@ -18,7 +18,9 @@ const LIMBS = [
 ];
 const SHAKE_G   = 2.2;   // peak |accel| (g) that counts as an intentional shake
 const CONFIRM_N = 2;     // consecutive polls above threshold from the same mac
-const POLL_MS   = 220;
+// `peakG` stays fresh on the rig for one second, so 500 ms still catches a
+// deliberate shake while avoiding a 4.5-request/s HTTPS storm on a tiny AP.
+const POLL_MS   = 500;
 
 let api = null;
 let onTour = () => {};
@@ -42,6 +44,10 @@ export function openSetupWizard() {
   assignedMacs.clear();
   overlay = document.createElement('div');
   overlay.className = 'setup-overlay';
+  // Tapping the dark backdrop (anywhere outside the card) closes the wizard, so it
+  // can never trap the app — one of the reported "หน้าซ้อนทับกดปุ่มไม่ได้" cases was
+  // the wizard sitting on top with the skip button out of reach.
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) closeWizard(); });
   document.body.appendChild(overlay);
   render();
 }
@@ -67,7 +73,9 @@ function render() {
 }
 
 function card(inner) {
-  overlay.innerHTML = `<div class="setup-card">${inner}</div>`;
+  // Always-present ✕ so the wizard is escapable from any step, even mid-detection.
+  overlay.innerHTML = `<button class="setup-close" data-act="close-x" type="button" aria-label="ปิดตัวช่วยตั้งค่า">✕</button><div class="setup-card">${inner}</div>`;
+  overlay.querySelector('[data-act="close-x"]')?.addEventListener('click', closeWizard);
 }
 
 function renderWelcome() {
@@ -102,9 +110,13 @@ function renderWelcome() {
 // finding out three steps later.
 function startPollForOnlineCount() {
   const txt = () => overlay?.querySelector('#setupOnlineTxt');
+  let inFlight = false;
   const tick = async () => {
+    if (inFlight) return;
+    inFlight = true;
     let nodes;
     try { nodes = await api.nodes(); } catch (e) { return; }
+    finally { inFlight = false; }
     if (!overlay || !txt()) return;
     const online = (nodes || []).filter(n => (n.ageMs ?? 9999) < 3000);
     txt().textContent = online.length
@@ -167,10 +179,14 @@ function startPollForShake() {
   candidateMac = null; candidateHits = 0;
   const bar = () => overlay?.querySelector('#setupBar');
   const txt = () => overlay?.querySelector('#setupDetectTxt');
+  let inFlight = false;
 
   pollTimer = setInterval(async () => {
+    if (inFlight) return;
+    inFlight = true;
     let nodes;
     try { nodes = await api.nodes(); } catch (e) { return; }
+    finally { inFlight = false; }
     if (!overlay) return;
 
     // candidates: online nodes not already claimed this run

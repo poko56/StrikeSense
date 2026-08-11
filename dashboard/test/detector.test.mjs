@@ -79,6 +79,12 @@ test('reports the peak, not the first frame over the threshold', () => {
   assert.equal(hit.peakG, 15);
 });
 
+test('reports the peak timestamp for camera-to-IMU fusion', () => {
+  const [hit] = run(v2(), [1, 1, 6, 8, 15, 9, 3, 1, 1, 1], { t0: 1000 });
+  assert.equal(hit.impactAtMs, 1000 + 4 * FRAME_MS,
+    'the matched pose must be from the true impact peak, not detector close time');
+});
+
 test('endBack rewinds the window to the frame that held the peak', () => {
   // Peak in frame 3, then a long slow decay: the search expires four frames
   // later, so the window has to be rewound by exactly that much.

@@ -103,6 +103,7 @@ let net  = null;   // parsed model (from ainet.parseModel): { timeSteps, feature
 // cached DOM
 let elFile, elClear, elStatus, elEnable, elBig, elConf, elProbs, elRecent, elList;
 let elAlways, elAlwaysHint, elCoverage;
+let panelReady = false;   // initAiModel() found its DOM and wired the panel
 
 // model library on the rig's SD card: many files, one active
 let library = { active: '', models: [] };
@@ -228,11 +229,30 @@ export function aiDetectParams() {
   });
 }
 
+/**
+ * Samples of follow-through the model's training windows included after the
+ * impact. The live path has to wait this long before classifying — a window that
+ * ends at the peak is a slice the model was never shown. 0 for older models,
+ * whose windows ended at the peak.
+ */
+export function aiPostPeak() {
+  const d = net && net.meta && net.meta.detect;
+  return d ? (Number(d.post_peak) || 0) : 0;
+}
+
 /** Confidence floor calibrated at training time; 0 for models without one. */
 function minConf() {
   const d = net && net.meta && net.meta.detect;
   return d ? (Number(d.min_conf) || 0) : 0;
 }
+
+/**
+ * Coach's "run live inference" preference. Defaults ON: the whole point of the
+ * feature is to name techniques, so a model that is present should start doing it
+ * at once — the coach shouldn't have to hunt for a switch after every reload. Only
+ * an explicit un-tick is remembered.
+ */
+function enabledPref() { return !!persist.get(PERSIST_KEYS.aiEnabled, true); }
 
 /**
  * The measured [log peak accel, log peak gyro] distribution of one technique, so
@@ -282,6 +302,9 @@ function activate(doc) {
   state.ai.ready = true;
   state.ai.meta  = net.meta;
   state.ai.error = '';
+  // A present model detects by default — no extra tap after a reload. Honours an
+  // explicit opt-out only (enabledPref reads false when the coach un-ticked it).
+  state.ai.enabled = enabledPref();
   state.ai.rawBySlot.clear();      // feature count may have changed
   try { persist.set(LS_KEY, doc); } catch (e) { /* quota — SD is the source of truth */ }
 }
@@ -315,6 +338,7 @@ function handleFile(file) {
       return;
     }
     state.ai.enabled = true;         // auto-enable on successful upload
+    persist.set(PERSIST_KEYS.aiEnabled, true);   // uploading a model is opting in
     state.ai.source  = 'local';
 
     if (!isDemo()) {                 // save into the rig's SD card library
@@ -376,7 +400,7 @@ async function selectModel(name) {
   try {
     await api.modelActivate(name);
     const doc = await api.modelGet();
-    if (doc) { activate(doc); state.ai.source = 'sd'; state.ai.enabled = true; }
+    if (doc) { activate(doc); state.ai.source = 'sd'; state.ai.enabled = true; persist.set(PERSIST_KEYS.aiEnabled, true); }
     library.active = name;
     state.ai.error = '';
   } catch (e) {
@@ -439,7 +463,9 @@ export function initAiModel() {
   elCoverage   = document.getElementById('aiCoverage');
   if (!elFile) return;   // panel absent → no-op
 
-  state.ai.alwaysName = !!persist.get(PERSIST_KEYS.aiAlwaysName, false);
+  // Default comes from state.js (on); only an explicit choice by the coach
+  // overrides it, so upgrading does not silently re-enable abstention.
+  state.ai.alwaysName = !!persist.get(PERSIST_KEYS.aiAlwaysName, state.ai.alwaysName);
   elAlways?.addEventListener('change', e => {
     state.ai.alwaysName = e.target.checked;
     persist.set(PERSIST_KEYS.aiAlwaysName, state.ai.alwaysName);
@@ -454,6 +480,7 @@ export function initAiModel() {
   elClear?.addEventListener('click', async () => { clearModel(); await refreshLibrary(); renderAiModel(); });
   elEnable?.addEventListener('change', e => {
     state.ai.enabled = e.target.checked && state.ai.ready;
+    persist.set(PERSIST_KEYS.aiEnabled, e.target.checked);   // remember an explicit choice
     renderAiModel();
   });
 
@@ -465,7 +492,21 @@ export function initAiModel() {
     if (row) selectModel(row.dataset.name);
   });
 
-  // restore from SD card (preferred) or this browser's local cache
+  panelReady = true;
+}
+
+/**
+ * Restore from SD card (preferred) or this browser's local cache.
+ *
+ * Split out of initAiModel() on purpose. /api/model streams the whole trained
+ * model — around 140 KB — off the SD card through the rig's TLS proxy, and the
+ * secure server has only two client sockets. Fired at panel-init time it went
+ * to the front of the REST lane and could hold the one free slot long enough
+ * that the live stream never got in. main.js now calls this last, once the
+ * stream is up and the cheap status reads are done.
+ */
+export function startAiModelLoad() {
+  if (!panelReady) return;
   loadInitialModel();
   refreshLibrary();
 }
@@ -512,16 +553,35 @@ function renderCoverage() {
           + ` — ขาที่ขยับโดยไม่ได้เตะจะไม่มีคำตอบที่ถูกต้องให้เลือก</div>`);
 }
 
+// ── DOM writes that do not churn ─────────────────────────────────────────────
+// Assigning textContent DESTROYS the element's existing text node and creates a
+// new one — even when the string is identical. The render loop runs every frame,
+// so a label the coach is touching is rebuilt ten times during a 185 ms tap, and
+// the browser cancels the click because what was under the finger no longer
+// exists. Measured on an iPad: the lost tap landed on span#btnRecLabel, whose
+// text renderDial() rewrote unconditionally.
+//
+// Writing only on change also skips a layout invalidation per frame per label.
+function setText(el, value) {
+  if (!el) return;
+  const v = String(value);
+  if (el.textContent !== v) el.textContent = v;
+}
+function setHtml(el, value) {
+  if (!el) return;
+  if (el.innerHTML !== value) el.innerHTML = value;
+}
+
 export function renderAiModel() {
   if (!elStatus) return;
   const ai = state.ai;
   renderModelList();   // keep the library list in sync with active/upload/delete
 
   if (ai.saving) {
-    elStatus.textContent = '⏳ กำลังบันทึกโมเดลลง SD card…';
+    setText(elStatus, '⏳ กำลังบันทึกโมเดลลง SD card…');
     elStatus.className = 'ai-status';
   } else if (ai.error) {
-    elStatus.textContent = '⚠ ' + ai.error;
+    setText(elStatus, '⚠ ' + ai.error);
     elStatus.className = 'ai-status err';
   } else if (ai.ready) {
     const m = ai.meta;
@@ -530,7 +590,7 @@ export function renderAiModel() {
                          + (where ? ` · เก็บที่ ${where}` : '');
     elStatus.className = 'ai-status ok';
   } else {
-    elStatus.textContent = 'ยังไม่ได้โหลดโมเดล — ตรวจจับแรง G ได้ แต่ยังแยกท่าไม่ได้';
+    setText(elStatus, 'ยังไม่ได้โหลดโมเดล — ตรวจจับแรง G ได้ แต่ยังแยกท่าไม่ได้');
     elStatus.className = 'ai-status';
   }
 
@@ -543,16 +603,16 @@ export function renderAiModel() {
   if (elAlwaysHint) {
     const floor = Math.round(minConf() * 100);
     elAlwaysHint.textContent = ai.alwaysName
-      ? `ตี 100 ครั้งได้ชื่อท่า 99 ครั้ง (แม่น 80%) — ชื่อที่โมเดลมั่นใจต่ำกว่า ${floor}% ขึ้นกรอบประ`
-        + ' · ยังกันการกระแทกที่ไม่ใช่ท่า (ถุงมือหล่น/ปรับเซ็นเซอร์) ไว้เหมือนเดิม'
+      ? `ตี 100 ครั้งได้ชื่อท่า 99 ครั้ง · ถูก 87 ครั้ง — ชื่อที่โมเดลมั่นใจต่ำกว่า ${floor}% ขึ้นกรอบประ`
+        + ' · ยังกันการกระแทกที่ไม่ใช่ท่า (ถุงมือหล่น/ก้าวเท้า/ปรับเซ็นเซอร์) ไว้เหมือนเดิม'
       : (floor
-          ? `ตี 100 ครั้งได้ชื่อท่า 81 ครั้ง (แม่น 87%) — ที่เหลือขึ้น "ไม่ระบุ" เพราะมั่นใจต่ำกว่า ${floor}%`
+          ? `ตี 100 ครั้งได้ชื่อท่า 69 ครั้ง · ถูก 67 ครั้ง — อีก 31 ครั้งขึ้น "ไม่ระบุ" เพราะมั่นใจต่ำกว่า ${floor}%`
           : '');
   }
 
   const last = ai.last;
-  if (elBig)  elBig.textContent  = last ? last.label : '—';
-  if (elConf) elConf.textContent = last ? `${(last.conf * 100).toFixed(0)}% · ${SLOT_TAG[last.slot] || ''}` : '';
+  if (elBig) setText(elBig, last ? last.label : '—');
+  if (elConf) setText(elConf, last ? `${(last.conf * 100).toFixed(0)}% · ${SLOT_TAG[last.slot] || ''}` : '');
   if (elBig)  elBig.classList.toggle('uncertain', !!last && last.conf < MIN_CONF);
 
   // probability bars for the last detection

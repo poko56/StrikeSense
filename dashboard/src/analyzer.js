@@ -1,9 +1,11 @@
 // Strike detection, waveform buffer, per-round + time-on-target tracking.
 import { state, scheduleRender, pushActivity, WAVEFORM_SAMPLES } from './state.js';
 import { applyOffset, isCalibrating, collectSample } from './calibrate.js';
-import { aiOnStrike, aiPushSample, aiDetectParams, aiStrikeNorm } from './aimodel.js';
+import { aiOnStrike, aiPushSample, aiDetectParams, aiStrikeNorm, aiPostPeak } from './aimodel.js';
 import { createDetector } from './detector.js';
+import { createNamingQueue } from './naming.js';
 import { scoreStrike } from './strikescore.js';
+import { attachPoseToImpact } from './motioncapture.js';
 
 // One detector for the whole rig; it keeps its own per-slot state. Rebuilt
 // whenever the active settings change, because a detector carries the arm/search
@@ -57,6 +59,11 @@ export function classifyStrike(slot, peakG, peakDps) {
   return 'push';
 }
 
+// Max gap between two strikes for them to belong to the same combo. A jab-cross
+// is ~200-400 ms apart; 2 s comfortably chains a combination but breaks between
+// separate exchanges.
+export const COMBO_GAP_MS = 2000;
+
 function bucketForce(g) {
   if (g >= 10) return '10+';
   if (g >= 5)  return '5-10';
@@ -78,7 +85,7 @@ function ensureLive(slot, mac) {
   return live;
 }
 
-export function ingestBatch({ slot, rssi, mac, samples, seq, recvMs }) {
+export function ingestBatch({ slot, rssi, mac, samples, seq, recvMs, tMs }) {
   if (slot === 0) return;
 
   // Calibration mode: collect raw samples, skip detection so the user can hold still
@@ -116,10 +123,15 @@ export function ingestBatch({ slot, rssi, mac, samples, seq, recvMs }) {
   live.waveform[live.waveIdx] = maxG;
   live.waveIdx = (live.waveIdx + 1) % WAVEFORM_SAMPLES;
 
-  const nowPerf = performance.now();
+  // Keep visual feedback on the browser's current clock. WS frames also carry
+  // the Main Node receive time mapped to this page's clock; that source time is
+  // for detector/pose alignment only. A delayed packet must not make a body-map
+  // flash or peak-hold look as if it happened in the past.
+  const uiNowPerf = performance.now();
+  const detectorPerf = Number.isFinite(tMs) ? tMs : uiNowPerf;
   if (maxG > live.peakG) {
     live.peakG      = maxG;
-    live.peakHoldMs = nowPerf;
+    live.peakHoldMs = uiNowPerf;
   }
 
   // always-on sensor activity — updated every packet regardless of recording,
@@ -134,9 +146,9 @@ export function ingestBatch({ slot, rssi, mac, samples, seq, recvMs }) {
 
   // Track active time (only count packets while session active)
   if (state.session.active) {
-    state.activeMsByWindow.push({ t: nowPerf, mag: live.rmsG });
+    state.activeMsByWindow.push({ t: uiNowPerf, mag: live.rmsG });
     // keep last 60s of activity records
-    const cutoff = nowPerf - 60_000;
+    const cutoff = uiNowPerf - 60_000;
     while (state.activeMsByWindow.length && state.activeMsByWindow[0].t < cutoff) state.activeMsByWindow.shift();
   }
 
@@ -147,59 +159,112 @@ export function ingestBatch({ slot, rssi, mac, samples, seq, recvMs }) {
   // model is handed is cut exactly as its training windows were. Falls back to the
   // manual sliders when no model is loaded.
   const recording = state.session.active || state.demoMode;
-  const hit = activeDetector().feed(slot, { maxG, maxDps, n: samples.length, tMs: nowPerf });
+
+  // A strike whose window is still filling. The model is trained on windows that
+  // run PAST the impact — the follow-through is what separates a Cross from a Jab
+  // — so naming has to wait for those samples to arrive. See resolveNaming().
+  advancePending(slot, samples.length);
+
+  const hit = activeDetector().feed(slot, { maxG, maxDps, n: samples.length, tMs: detectorPerf });
   if (hit) {
-    state.lastStrikeBySlot.set(slot, nowPerf);
+    state.lastStrikeBySlot.set(slot, uiNowPerf);
     la.lastHitMs = Date.now();
-    state.ui.bodyHitFlash.set(slot, nowPerf);          // body-map flash works even when idle
-    // The detector spends up to searchMs finding the true peak, so by now the
-    // stream has moved past it. hit.endBack rewinds the window to the impact.
-    const ai = aiOnStrike(slot, hit.endBack);           // gesture preview runs live too
-    if (recording) recordStrike({ slot, peakG: hit.peakG, peakDps: hit.peakDps,
-                                  recvMs: recvMs ?? Date.now(), seq, ai });
+    state.ui.bodyHitFlash.set(slot, uiNowPerf);         // body-map flash works even when idle
+    // Log the strike NOW, unnamed. Count, force and the body-map flash are what a
+    // coach reacts to in the moment and they must not lag behind the punch; the
+    // technique name is filled in a few frames later, in place.
+    const impactAtMs = hit.impactAtMs ?? hit.tMs ?? detectorPerf;
+    const ev = recording
+      ? recordStrike({ slot, peakG: hit.peakG, peakDps: hit.peakDps,
+                       recvMs: recvMs ?? Date.now(), seq, impactAtMs })
+      : null;
+    // Camera setup should be checkable before pressing REC. The transient
+    // attachment updates the motion panel but is intentionally not logged as a
+    // strike until a session/demo is actually recording.
+    if (!ev) attachPoseToImpact({ slot, impactAtMs });
+    // The detector spends up to searchMs finding the true peak, so the stream has
+    // already moved past it. hit.endBack rewinds to the impact; postPeak pushes
+    // the window end forward into the follow-through.
+    queueNaming(slot, hit.endBack, ev);
   }
 
   scheduleRender();
 }
 
-function recordStrike({ slot, peakG, peakDps, recvMs, seq, ai }) {
+// ── deferred technique naming ────────────────────────────────────────────────
+// The counting lives in naming.js; this is just what to do when it says go.
+const naming = createNamingQueue(aiPostPeak);
+
+function advancePending(slot, n) { classifyIfReady(slot, naming.advance(slot, n)); }
+function queueNaming(slot, endBack, ev) { classifyIfReady(slot, naming.push(slot, endBack, ev)); }
+
+function classifyIfReady(slot, due) {
+  if (!due) return;                              // follow-through still arriving
+  const ai = aiOnStrike(slot, due.back);
+  if (!due.ctx || !ai || !ai.label) return;
+  nameStrike(due.ctx, ai);
+}
+
+/** Attach a technique to a strike already in the log, and fix up what depended on it. */
+function nameStrike(ev, ai) {
+  ev.type    = ai.label;
+  ev.aiLabel = ai.label;
+  ev.aiConf  = ai.conf;
+  // The score compares a strike with others of its OWN technique, so it has to be
+  // recomputed now that the technique is known — the value written at log time
+  // used the pooled reference.
+  const sc = scoreStrike({ peakG: ev.peakG, peakDps: ev.peakDps }, aiStrikeNorm(ai.label));
+  ev.score = sc.score; ev.scorePower = sc.power; ev.scoreSpeed = sc.speed; ev.scoreRef = sc.ref;
+  state.distribution[ai.label] = (state.distribution[ai.label] || 0) + 1;
+  state.strikeSeq++;                // nudge the log's change-detection signature
+  scheduleRender();
+}
+
+/** Drop anything half-classified — session reset, model swap, node dropout. */
+export function resetPendingNaming() { naming.clear(); }
+
+function recordStrike({ slot, peakG, peakDps, recvMs, seq, impactAtMs }) {
   const sessionT = state.session.active ? (recvMs - state.session.startedAtMs) : 0;
-  // Technique naming comes from the trained model alone. classifyStrike() is a
-  // hand-tuned ladder of peak-G / rotation cut-offs that answers with the same
-  // confidence whether or not it has any basis, and it cannot separate techniques
-  // that differ in shape rather than force. Unnamed is honest; a guess dressed up
-  // as a reading is not.
-  const type     = (ai && ai.label) || null;
+  // Technique naming comes from the trained model alone, and arrives a few frames
+  // later than the strike — see resolveNaming(). classifyStrike() is a hand-tuned
+  // ladder of peak-G / rotation cut-offs that answers with the same confidence
+  // whether or not it has any basis, and it cannot separate techniques that
+  // differ in shape rather than force. Unnamed is honest; a guess dressed up as a
+  // reading is not.
   const lastT    = state.strikes.length ? state.strikes[state.strikes.length - 1].sessionMs : 0;
   const recoverMs= sessionT - lastT;
 
-  // Score against strikes of the SAME technique when the model named it, so an
-  // uppercut is not marked weak for landing at an uppercut's normal force.
-  // Unnamed strikes fall back to the pooled reference.
-  const sc = scoreStrike({ peakG, peakDps }, aiStrikeNorm(type));
+  // Scored against the pooled reference for now; nameStrike() recomputes it
+  // against the technique's own distribution once the technique is known.
+  const sc = scoreStrike({ peakG, peakDps }, null);
 
   const ev = {
     id:        ++state.strikeSeq,
-    slot, type, peakG, peakDps,
+    slot, type: null, peakG, peakDps,
     score:      sc.score,
     scorePower: sc.power,
     scoreSpeed: sc.speed,
     scoreRef:   sc.ref,
-    aiLabel:   ai ? ai.label : null,
-    aiConf:    ai ? ai.conf  : 0,
+    aiLabel:   null,
+    aiConf:    0,
     durationMs: 0,
     recoverMs,
     sessionMs:  sessionT,
     wallMs:     recvMs,
+    // This is performance.now() time, not a wall-clock field for export. It lets
+    // the pose ring select the actual impact frame instead of the later moment
+    // when the detector's post-peak search closed.
+    impactAtMs,
     seq,
     round:      state.timer.mode === 'work' ? state.timer.currentRound : 0,
   };
+  ev.pose = attachPoseToImpact(ev);
   state.strikes.push(ev);
   if (state.strikes.length > 500) state.strikes.shift();
 
   // Unnamed strikes still count toward force/asymmetry/fatigue — only the
-  // technique breakdown needs a name to bucket into.
-  if (type) state.distribution[type] = (state.distribution[type] || 0) + 1;
+  // technique breakdown needs a name to bucket into, and that happens in
+  // nameStrike() when the model answers.
   state.histogram[bucketForce(peakG)]++;
   if (slot === 1 || slot === 3) state.leftCount++;
   if (slot === 2 || slot === 4) state.rightCount++;
@@ -212,8 +277,16 @@ function recordStrike({ slot, peakG, peakDps, recvMs, seq, ai }) {
   const cutoff = recvMs - state.tuning.fatigueWindow * 2;
   while (state.fatigueHistory.length && state.fatigueHistory[0].t < cutoff) state.fatigueHistory.shift();
 
+  // Live combo: consecutive strikes within COMBO_GAP_MS. First strike after a
+  // pause restarts the run at 1; `best` tracks the longest run this session.
+  const c = state.combo;
+  c.current = (c.lastAtMs && (recvMs - c.lastAtMs) <= COMBO_GAP_MS) ? c.current + 1 : 1;
+  c.lastAtMs = recvMs;
+  if (c.current > c.best) c.best = c.current;
+
   // Goal completion check
   checkGoalCompletion();
+  return ev;                 // the caller names it once the model answers
 }
 
 function checkGoalCompletion() {

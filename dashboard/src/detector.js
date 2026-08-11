@@ -114,7 +114,8 @@ export function createDetector(cfg) {
     let s = bySlot.get(slot);
     if (!s) {
       s = { armed: true, searching: false, left: 0,
-            bestDyn: 0, bestAbs: 0, bestDps: 0, bestBack: 0, lastFireMs: -1e9 };
+            bestDyn: 0, bestAbs: 0, bestDps: 0, bestBack: 0, bestAtMs: 0,
+            lastFireMs: -1e9 };
       bySlot.set(slot, s);
     }
     return s;
@@ -133,11 +134,13 @@ export function createDetector(cfg) {
      *        maxDps peak |gyro| over the frame, in deg/s
      *        n      samples in the frame
      *        tMs    timestamp of the frame on the caller's clock
-     * @returns {null|{peakG:number, peakDps:number, endBack:number, tMs:number}}
+     * @returns {null|{peakG:number, peakDps:number, endBack:number, tMs:number, impactAtMs:number}}
      *        peakG/peakDps of the impact (peakG still gravity-included, so force
      *        stats keep their existing meaning), and `endBack` = how many samples
      *        have been pushed since the end of the frame that held the peak. The
      *        classifier window must end that far back, not at the newest sample.
+     *        `impactAtMs` identifies the batch that held the peak on the caller's
+     *        monotonic clock, so it can be matched to a nearby camera pose frame.
      */
     feed(slot, frame) {
       const s = slotState(slot);
@@ -146,7 +149,7 @@ export function createDetector(cfg) {
       if (c.version === 1) {
         if (maxG >= c.thresholdG && (tMs - s.lastFireMs) >= c.refractoryMs) {
           s.lastFireMs = tMs;
-          return { peakG: maxG, peakDps: maxDps, endBack: 0, tMs };
+          return { peakG: maxG, peakDps: maxDps, endBack: 0, tMs, impactAtMs: tMs };
         }
         return null;
       }
@@ -165,6 +168,7 @@ export function createDetector(cfg) {
           s.armed     = false;
           s.left      = searchSamples - n;
           s.bestDyn = dyn; s.bestAbs = maxG; s.bestDps = maxDps; s.bestBack = 0;
+          s.bestAtMs = tMs;
         }
         return null;
       }
@@ -172,7 +176,7 @@ export function createDetector(cfg) {
       if (dyn > s.bestDyn) {
         // Still climbing — this is not the top yet. Restart the clock so the
         // whole burst is followed rather than the first `searchMs` of it.
-        s.bestDyn = dyn; s.bestAbs = maxG; s.bestBack = 0;
+        s.bestDyn = dyn; s.bestAbs = maxG; s.bestBack = 0; s.bestAtMs = tMs;
         s.left = searchSamples;
       } else {
         s.left -= n;
@@ -193,7 +197,10 @@ export function createDetector(cfg) {
       if (s.bestDps < c.minPeakDps) return null;
 
       s.lastFireMs = tMs;
-      return { peakG: s.bestAbs, peakDps: s.bestDps, endBack: s.bestBack, tMs };
+      return {
+        peakG: s.bestAbs, peakDps: s.bestDps, endBack: s.bestBack, tMs,
+        impactAtMs: s.bestAtMs,
+      };
     },
   };
 }

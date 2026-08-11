@@ -1,6 +1,12 @@
 # StrikeSense Main Node API
 
-Base URL: `http://192.168.4.1` (Main Node AP IP, SSID `StrikeSense`)
+Secure base URL: `https://192.168.4.1` for the Local-CA deployment, or
+`https://<hostname>` for the Let's Encrypt deployment (the exact hostname in
+`/tls/hostname.txt`). Use the secure origin for browser clients and camera mode.
+Local CA must be installed/trusted first; a valid public certificate does not.
+Legacy HTTP remains only for service compatibility and the HTTPS loopback
+backend, not for secure browser use. The IP-address examples below are Local-CA
+examples; replace the host and omit `--cacert` when using Let's Encrypt.
 
 ## REST Endpoints
 
@@ -150,15 +156,15 @@ t_ms,slot,seq,sample_idx,ax,ay,az,gx,gy,gz
 ## AI Team Interface — two ways to consume data
 
 ### 1. Live API (real-time inference)
-Connect to `ws://192.168.4.1/ws`, decode each binary frame, feed model.
+Connect to `wss://192.168.4.1/ws`, decode each binary frame, feed model.
 Use during training-floor sessions for instant feedback.
 
 ### 2. Offline Export (training corpus)
 ```bash
 # List sessions
-curl http://192.168.4.1/api/sessions
+curl --cacert ./strikesense-ca.pem https://192.168.4.1/api/sessions
 
 # Download one session
-curl -O http://192.168.4.1/api/sessions/1738291201
+curl --cacert ./strikesense-ca.pem -O https://192.168.4.1/api/sessions/1738291201
 ```
 Use for model training, evaluation, and replay.

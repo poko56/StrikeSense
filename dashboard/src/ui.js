@@ -4,7 +4,7 @@
 import { state, SLOT_NAMES, SLOT_SHORT, scheduleRender, pushActivity, WAVEFORM_SAMPLES } from './state.js';
 import {
   computeSpm, computeAvgG, computeFatigue, computeCv, computeWorkKJ, computeTimeOnTarget,
-  addMarker, deleteMarker,
+  addMarker, deleteMarker, COMBO_GAP_MS,
 } from './analyzer.js';
 import { api as realApi } from './api.js';
 import { persist } from './persist.js';
@@ -12,6 +12,10 @@ import { reconnectStream } from './ws.js';
 import { openModal, closeModal } from './modal.js';
 import { startCalibration, startCalibrationFor, abortCalibration, clearCalibration, clearAllCalibration, isCalibratingAny } from './calibrate.js';
 import { loadSession, Playback } from './replay.js';
+import { techLabel, techTh } from './technames.js';
+
+// Injected by vite; 'dev' when running the source directly.
+const BUILD_ID = typeof __BUILD_ID__ === 'string' ? __BUILD_ID__ : 'dev';
 
 // The active backend: the real REST client, or the demo stub when the dashboard
 // runs with ?demo=1. main.js supplies it via initUi(). ui.js used to always talk
@@ -28,6 +32,25 @@ const $ = id => document.getElementById(id);
 // Each heavy section now declares a cheap signature and only touches the DOM when
 // that signature actually changes.
 const _renderSig = Object.create(null);
+// ── DOM writes that do not churn ─────────────────────────────────────────────
+// Assigning textContent DESTROYS the element's existing text node and creates a
+// new one — even when the string is identical. The render loop runs every frame,
+// so a label the coach is touching is rebuilt ten times during a 185 ms tap, and
+// the browser cancels the click because what was under the finger no longer
+// exists. Measured on an iPad: the lost tap landed on span#btnRecLabel, whose
+// text renderDial() rewrote unconditionally.
+//
+// Writing only on change also skips a layout invalidation per frame per label.
+function setText(el, value) {
+  if (!el) return;
+  const v = String(value);
+  if (el.textContent !== v) el.textContent = v;
+}
+function setHtml(el, value) {
+  if (!el) return;
+  if (el.innerHTML !== value) el.innerHTML = value;
+}
+
 function changed(key, sig) {
   if (_renderSig[key] === sig) return false;
   _renderSig[key] = sig;
@@ -60,7 +83,24 @@ function fmtDate(unix) {
 }
 // A strike only carries a technique name when the trained model produced one.
 // Show that plainly instead of substituting a guess.
-function fmtType(t) { return t ? String(t).toUpperCase() : 'ไม่ระบุ'; }
+// A coach at the bag reads Thai. The model's English label is kept only as a
+// subtitle where there is room for it — see technames.js.
+function fmtType(t) { return techLabel(t); }
+
+const POSE_JOINT_TH = Object.freeze({
+  shoulder: 'ไหล่', elbow: 'ศอก', hip: 'สะโพก', knee: 'เข่า', ankle: 'ข้อเท้า',
+});
+
+// Pose snapshots have already been visibility-gated by posemath. Keep their
+// display defensive nevertheless: a missing/hidden joint is not a 0° joint.
+function poseAnglesText(pose, { compact = false } = {}) {
+  if (!pose || !pose.angles || typeof pose.angles !== 'object') return '—';
+  const values = Object.entries(pose.angles)
+    .filter(([, degrees]) => Number.isFinite(degrees))
+    .map(([joint, degrees]) => `${POSE_JOINT_TH[joint] || joint} ${Math.round(degrees)}°`);
+  if (!values.length) return '—';
+  return compact ? values[0] : values.join(' · ');
+}
 
 function fmtRelTime(ms) {
   const d = Date.now() - ms;
@@ -99,9 +139,8 @@ function renderTopbar() {
   $('curRound').textContent = (t.mode === 'idle' || t.mode === 'done')
     ? '—'
     : t.stopwatch ? '∞' : `${t.currentRound}/${t.rounds}`;
-  $('curPhase').textContent = PHASE_TH[t.mode] || t.mode.toUpperCase();
-  $('curClock').textContent = fmtClock(t.remainingMs);
-
+  setText($('curPhase'), PHASE_TH[t.mode] || t.mode.toUpperCase());
+  setText($('curClock'), fmtClock(t.remainingMs));
   const pill = $('recPill'), pillTxt = $('recPillTxt');
   if (state.session.active) { pill.className = 'pill pill-rec'; pillTxt.textContent = 'กำลังบันทึก'; }
   else if (t.mode === 'rest') { pill.className = 'pill pill-rest'; pillTxt.textContent = 'พัก'; }
@@ -115,7 +154,7 @@ function renderTopbar() {
     const la = state.liveActivity;
     const fresh    = (Date.now() - la.lastSampleMs) < 2500;        // data arriving = responsive
     const hitPulse = (Date.now() - la.lastHitMs) < 350;
-    lg.textContent = fresh ? la.curG.toFixed(1) : '0.0';
+    setText(lg, fresh ? la.curG.toFixed(1) : '0.0');
     ls.classList.toggle('is-live', fresh);
     ls.classList.toggle('is-hit', hitPulse);
   }
@@ -135,15 +174,14 @@ function renderDial() {
   $('dialFill').setAttribute('stroke-dashoffset', `${100 - Math.min(100, Math.max(0, frac * 100))}`);
   $('roundDial').classList.toggle('is-rest', t.mode === 'rest');
 
-  $('dialClock').textContent = fmtClock(t.remainingMs);
+  setText($('dialClock'), fmtClock(t.remainingMs));
   $('dialPhase').textContent = (t.mode === 'idle' ? 'พร้อม'
                               : t.mode === 'done' ? 'จบแล้ว'
                               : t.stopwatch ? 'จับเวลา' : PHASE_TH[t.mode] || t.mode.toUpperCase());
-  $('dialRound').textContent = t.stopwatch ? '— · อิสระ —' : `ยก ${t.currentRound || '—'} / ${t.rounds}`;
-
+  setText($('dialRound'), t.stopwatch ? '— · อิสระ —' : `ยก ${t.currentRound || '—'} / ${t.rounds}`);
   const btn = $('btnRec'), lbl = $('btnRecLabel');
-  if (state.session.active) { btn.classList.add('is-rec'); lbl.textContent = 'หยุด'; }
-  else { btn.classList.remove('is-rec'); lbl.textContent = 'บันทึก'; }
+  if (state.session.active) { btn.classList.add('is-rec'); lbl.textContent = 'หยุดบันทึก'; }
+  else { btn.classList.remove('is-rec'); lbl.textContent = 'เริ่มบันทึกการซ้อม'; }
 }
 
 // timer phase → Thai (used by dial + topbar)
@@ -157,13 +195,13 @@ function renderStats() {
   // Everything here changes on a strike or once a second — no need for 60 Hz.
   if (!changed('stats', `${state.strikes.length}|${state.peakG.toFixed(1)}|${Math.floor(dur0 / 1000)}`)) return;
 
-  $('stPeak').querySelector('.stat-num').textContent = state.peakG.toFixed(1);
-  $('stAvg').querySelector('.stat-num').textContent  = computeAvgG().toFixed(1);
-  $('stCount').textContent = state.strikes.length;
-  $('stSpm').textContent   = computeSpm().toFixed(0);
-  $('stToT').firstChild.textContent  = computeTimeOnTarget();
-  $('stWork').firstChild.textContent = computeWorkKJ().toFixed(2);
-  $('stDuration').textContent = fmtClock(dur0);
+  setText($('stPeak').querySelector('.stat-num'), state.peakG.toFixed(1));
+  setText($('stAvg').querySelector('.stat-num'), computeAvgG().toFixed(1));
+  setText($('stCount'), state.strikes.length);
+  setText($('stSpm'), computeSpm().toFixed(0));
+  setText($('stToT').firstChild, computeTimeOnTarget());
+  setText($('stWork').firstChild, computeWorkKJ().toFixed(2));
+  setText($('stDuration'), fmtClock(dur0));
 }
 
 // ───── BODY DIAGRAM (live or heatmap) ─────
@@ -226,7 +264,7 @@ function renderMixer() {
     if (!live || (now - live.lastSeenMs) > 3000) {
       lbl.classList.add('dim');
       fill.style.width = '0%'; peak.style.left = '0%';
-      val.textContent = '—';
+      setText(val, '—');
       clearSpark(cnv);
       continue;
     }
@@ -241,7 +279,7 @@ function renderMixer() {
     peak.style.left  = `${peakPct}%`;
     // number shows the INSTANTANEOUS gravity-removed G (steady ~0 at rest) instead
     // of the decaying peak-hold, which sawtoothed 1→0 while the node sat still.
-    val.textContent  = (live.curG ?? 0).toFixed(1) + 'g';
+    setText(val, (live.curG ?? 0).toFixed(1) + 'g');
     drawSpark(cnv, live.waveform, live.waveIdx);
   }
 }
@@ -282,20 +320,37 @@ function renderDistribution() {
   const total = state.strikes.length;
   // Only a recorded strike moves any of these numbers.
   if (!changed('dist', `${total}|${state.leftCount}|${state.rightCount}|${state.tuning.thresholdG}`)) return;
-  const entries = Object.entries(state.distribution).filter(([,v]) => v > 0);
+
+  // Count per technique with the average score beside it. A bare count says the
+  // athlete threw 40 jabs; the score says whether they were any good, which is
+  // the thing a coach changes the session over.
+  const byType = new Map();
+  for (const st of state.strikes) {
+    if (!st.type) continue;
+    let e = byType.get(st.type);
+    if (!e) { e = { n: 0, sum: 0 }; byType.set(st.type, e); }
+    e.n++; e.sum += (typeof st.score === 'number' ? st.score : 0);
+  }
+  const entries = [...byType.entries()].sort((a, b) => b[1].n - a[1].n);
+  const named = entries.reduce((s2, [, e]) => s2 + e.n, 0);
+  const unnamed = total - named;
+
   if (!entries.length) {
-    list.innerHTML = '<div class="empty-card" style="padding:10px">— no strikes —</div>';
+    list.innerHTML = '<div class="empty-card" style="padding:10px">— ยังไม่มีท่าที่ระบุได้ —</div>';
   } else {
-    entries.sort((a,b) => b[1] - a[1]);
-    list.innerHTML = entries.map(([type, n]) => {
-      const pct = total > 0 ? (n / total * 100) : 0;
+    const top = entries[0][1].n;
+    list.innerHTML = entries.map(([type, e]) => {
+      const avg = Math.round(e.sum / e.n);
+      const tier = avg >= 70 ? 'hi' : avg >= 45 ? 'mid' : 'lo';
       return `
         <div class="dist-row">
-          <span class="dist-name">${type.toUpperCase()}</span>
-          <div class="dist-bar"><span class="dist-fill" style="width:${pct}%"></span></div>
-          <span class="dist-cnt">${n} · ${pct.toFixed(0)}%</span>
+          <span class="dist-name">${techTh(type)}</span>
+          <div class="dist-bar"><span class="dist-fill" style="width:${(e.n / top * 100).toFixed(0)}%"></span></div>
+          <span class="dist-cnt mono">${e.n}</span>
+          <span class="dist-score t-${tier} mono" title="คะแนนเฉลี่ยของท่านี้">${avg}</span>
         </div>`;
-    }).join('');
+    }).join('')
+    + (unnamed ? `<div class="dist-unnamed dim small">อีก ${unnamed} ครั้งยังไม่ระบุท่า</div>` : '');
   }
 
   const histMax = Math.max(1, ...Object.values(state.histogram));
@@ -303,19 +358,18 @@ function renderDistribution() {
     const k = bar.dataset.range;
     const v = state.histogram[k] || 0;
     bar.querySelector('.hist-fill').style.height = `${(v / histMax) * 100}%`;
-    bar.querySelector('.hist-cnt').textContent  = v;
+    setText(bar.querySelector('.hist-cnt'), v);
   });
 
   const totalLR = state.leftCount + state.rightCount;
   const lPct = totalLR ? (state.leftCount / totalLR * 100) : 50;
   $('asymL').style.width = `${lPct}%`;
   $('asymR').style.width = `${100 - lPct}%`;
-  $('asymLtxt').textContent = `ซ้าย ${state.leftCount}`;
-  $('asymRtxt').textContent = `ขวา ${state.rightCount}`;
-
+  setText($('asymLtxt'), `ซ้าย ${state.leftCount}`);
+  setText($('asymRtxt'), `ขวา ${state.rightCount}`);
   const fat = computeFatigue();
   $('fatigueFill').style.width = `${fat.pct}%`;
-  $('fatigueTxt').textContent  = `${fat.pct}% · ${FATIGUE_TH[fat.label] || fat.label} · CV ${(computeCv()*100).toFixed(0)}%`;
+  setText($('fatigueTxt'), `${fat.pct}% · ${FATIGUE_TH[fat.label] || fat.label} · CV ${(computeCv()*100).toFixed(0)}%`);
 }
 const FATIGUE_TH = { 'stable': 'คงที่', 'fatiguing': 'เริ่มล้า', 'severely fatigued': 'ล้ามาก' };
 
@@ -327,18 +381,18 @@ function renderGoals() {
   const pPct = Math.min(100, (state.peakG          / Math.max(1, g.targetPeakG))   * 100);
   const sFill = $('goalStrFill'); sFill.style.width = `${sPct}%`;  sFill.classList.toggle('full', sPct >= 100);
   const pFill = $('goalPeakFill'); pFill.style.width = `${pPct}%`; pFill.classList.toggle('full', pPct >= 100);
-  $('goalStrTxt').textContent  = `${state.strikes.length} / ${g.targetStrikes}`;
-  $('goalPeakTxt').textContent = `${state.peakG.toFixed(1)} / ${g.targetPeakG} g`;
+  setText($('goalStrTxt'), `${state.strikes.length} / ${g.targetStrikes}`);
+  setText($('goalPeakTxt'), `${state.peakG.toFixed(1)} / ${g.targetPeakG} g`);
   const st = $('goalStatus');
   if (g.completedAt) {
     st.className = 'goal-status is-done';
-    st.textContent = `✓ COMPLETED at ${new Date(g.completedAt).toLocaleTimeString()}`;
+    setText(st, `✓ COMPLETED at ${new Date(g.completedAt).toLocaleTimeString()}`);
   } else if (state.session.active) {
     st.className = 'goal-status';
-    st.textContent = `${Math.round(Math.min(sPct, pPct))}% of goal · keep going`;
+    setText(st, `${Math.round(Math.min(sPct, pPct))}% of goal · keep going`);
   } else {
     st.className = 'goal-status';
-    st.textContent = '— set a target, hit it, repeat —';
+    setText(st, '— set a target, hit it, repeat —');
   }
 }
 
@@ -382,6 +436,81 @@ function renderActivity() {
   list.innerHTML = state.ui.activity.slice(0, 8).map(a => `
     <li class="ac-${a.kind}"><span class="ac-t">${fmtRelTime(a.t)}</span>${escapeHtml(a.text)}</li>
   `).join('');
+}
+
+// ───── RECENT RECORDINGS (home) ─────
+// The last few recordings, straight on the home view. Opening the full replay is
+// one tap — no switching to the คลังข้อมูล tab and hunting.
+function renderRecent() {
+  const list = $('recentList');
+  if (!list) return;
+  const sessions = [...state.sessions]
+    .sort((a, b) => (b.modTime || 0) - (a.modTime || 0)).slice(0, 4);
+  const sig = sessions.map(s => `${s.id}:${s.bytes || 0}`).join('|') || 'empty';
+  if (!changed('recent', sig)) return;
+  if (!sessions.length) {
+    list.innerHTML = '<div class="empty-card">— ยังไม่มีการซ้อมที่บันทึกไว้ · กดบันทึกเพื่อเริ่ม —</div>';
+    return;
+  }
+  list.innerHTML = sessions.map(s => `
+    <button class="recent-row" data-id="${escapeAttr(s.id)}" type="button">
+      <span class="recent-play">▶</span>
+      <span class="recent-info">
+        <span class="recent-id">${escapeHtml(s.id)}</span>
+        <span class="recent-meta mono">${fmtDate(s.modTime)} · ${fmtBytes(s.bytes)}</span>
+      </span>
+      <span class="recent-go">ดูย้อนหลัง</span>
+    </button>`).join('');
+  list.querySelectorAll('.recent-row').forEach(r =>
+    r.addEventListener('click', () => openSessionReplay(r.dataset.id)));
+}
+
+// ───── SCORING EXPLAINER ─────
+// The coach asked how the per-strike score is built. Say it plainly, in one place
+// they can reach from the log.
+export function openScoringHelpModal() {
+  openModal(`
+    <div class="dlg-head">
+      <div class="dlg-title">คะแนนแต่ละท่าคิดยังไง</div>
+      <button class="dlg-x" onclick="document.getElementById('appDialog').close()">✕</button>
+    </div>
+    <p class="help-lead">ทุกครั้งที่ออกอาวุธจะได้คะแนน <b>0–100</b> หนึ่งตัว — เทียบกับ
+      <b>ท่าเดียวกัน</b>ในข้อมูลจริง ไม่ใช่ "แรง = คะแนนสูง" ลอยๆ</p>
+
+    <div class="help-formula mono">คะแนน = 50 + 22 × ค่าเฉลี่ย( z<sub>พลัง</sub> , z<sub>ความเร็ว</sub> )</div>
+
+    <ul class="help-list">
+      <li><b>พลัง</b> — แรงกระแทกสูงสุด (peak g) ของครั้งนั้น</li>
+      <li><b>ความเร็ว</b> — ความเร็วเชิงมุมสูงสุด (peak °/s) ที่แขน/ขาหมุนผ่านจังหวะกระแทก</li>
+      <li>ทั้งสองแปลงเป็น <b>z-score</b> บนสเกล log เทียบค่าเฉลี่ยและการกระจายของ<b>ท่านั้นเอง</b> แล้วเฉลี่ยกัน</li>
+    </ul>
+
+    <table class="cmp-table help-scale">
+      <thead><tr><th>คะแนน</th><th>ความหมาย</th></tr></thead>
+      <tbody>
+        <tr><td class="mono">50</td><td>ท่าปกติทั่วไปของท่านั้น (ค่ากลาง)</td></tr>
+        <tr><td class="mono">~72</td><td>ดีกว่าค่าเฉลี่ยราว 1 เท่าของการกระจาย (1 SD)</td></tr>
+        <tr><td class="mono">~94</td><td>ดีกว่าค่าเฉลี่ยราว 2 SD — ทำได้ในวันฟอร์มดี</td></tr>
+      </tbody>
+    </table>
+
+    <p class="help-note">
+      <b>ทำไมเทียบเป็นรายท่า?</b> หมัดตรง (Cross) ลงหนักราว 14 g ส่วนหมัดเสย (Uppercut) ราว 9.5 g
+      โดยธรรมชาติ ถ้าใช้เกณฑ์เดียว "ยิ่งแรงยิ่งดี" หมัดเสยจะถูกตัดว่าอ่อนทุกครั้ง และหมัดตรงจะได้คะแนนเกินจริง
+    </p>
+    <p class="help-note dim">
+      ค่าอ้างอิงของแต่ละท่ามาจากโมเดล AI ที่เทรนไว้ (physics block) — เป็นการวัดจากสถิติจริง ไม่ใช่เกณฑ์เดา
+      · ถ้ายังไม่รู้ท่า (ไม่มีโมเดล/โมเดลไม่ระบุ) จะเทียบกับ “หมัดทั่วไป” แทน และมีเครื่องหมายจุดกำกับในคอลัมน์คะแนน
+    </p>
+    <div class="help-tiers">
+      <span class="help-tier t-hi">เขียว ≥ 70 · ดีเยี่ยม</span>
+      <span class="help-tier t-mid">เหลือง 45–69 · ปกติ</span>
+      <span class="help-tier t-lo">แดง < 45 · ต้องพัฒนา</span>
+    </div>
+    <div class="dlg-actions">
+      <button class="dlg-btn primary" onclick="document.getElementById('appDialog').close()">เข้าใจแล้ว</button>
+    </div>
+  `);
 }
 
 // ───── MARKERS ─────
@@ -435,6 +564,67 @@ function renderTimeline() {
   track.querySelectorAll('.tl-strike').forEach(el => {
     el.addEventListener('click', e => { openStrikeDetail(Number(e.target.dataset.sid)); e.stopPropagation(); });
   });
+}
+
+
+// ───── HERO · ท่าล่าสุด ─────
+const SLOT_TH = ['—', 'มือซ้าย', 'มือขวา', 'แข้งซ้าย', 'แข้งขวา'];
+
+/**
+ * The one thing on screen while the athlete is actually working: what they just
+ * threw and what it scored. Driven off the strike log rather than state.ai, so
+ * it shows the same answer the history does — including the technique that gets
+ * filled in a few frames after the impact.
+ */
+function renderHero() {
+  const el = $('heroTech');
+  if (!el) return;
+  const list = state.strikes;
+  const s = list.length ? list[list.length - 1] : null;
+  const sig = s ? `${s.id}|${s.type}|${s.score}|${s.pose?.frameAtMs || 0}` : 'none';
+  if (!changed('hero', sig + '|' + list.length)) return;
+
+  setText($('heroTotal'), list.length);
+  if (!s) {
+    setText(el, '—');
+    setText($('heroSub'), 'รอการออกอาวุธ');
+    setText($('heroScore'), '—');
+    $('heroScoreFill').style.width = '0%';
+    setText($('heroG'), '—');
+    setText($('heroDps'), '—');
+    setText($('heroSlot'), '—');
+    setText($('heroAngle'), '—');
+    return;
+  }
+  setText(el, techLabel(s.type));
+  el.classList.toggle('unnamed', !s.type);
+  setText($('heroSub'), s.type ? s.type : 'โมเดลไม่ระบุท่านี้');
+  const sc = typeof s.score === 'number' ? s.score : null;
+  setText($('heroScore'), sc ?? '—');
+  const fill = $('heroScoreFill');
+  fill.style.width = (sc ?? 0) + '%';
+  fill.className = sc == null ? '' : sc >= 70 ? 't-hi' : sc >= 45 ? 't-mid' : 't-lo';
+  setText($('heroG'), s.peakG.toFixed(1) + ' g');
+  setText($('heroDps'), Math.round(s.peakDps) + ' °/s');
+  setText($('heroSlot'), SLOT_TH[s.slot] || '—');
+  setText($('heroAngle'), poseAnglesText(s.pose, { compact: true }));
+}
+
+// ───── LIVE COMBO ─────
+// Shown outside renderHero's change-gate because it also has to switch OFF on a
+// timer (COMBO_GAP_MS after the last strike), not only when a strike lands.
+let _comboSig = '';
+function renderCombo() {
+  const el = $('heroCombo');
+  if (!el) return;
+  const c = state.combo;
+  const live = c.lastAtMs && (Date.now() - c.lastAtMs) <= COMBO_GAP_MS;
+  const show = live && c.current >= 2;
+  const sig = `${show ? 1 : 0}|${c.current}`;
+  if (sig === _comboSig) return;
+  _comboSig = sig;
+  el.hidden = !show;
+  if (show) setText($('heroComboN'), '×' + c.current);
 }
 
 // ───── STRIKE LOG ─────
@@ -842,8 +1032,8 @@ function openCalibrationModal(slot, mac) {
     const controller = startCalibration(slot, mac, dur, (elapsed, n) => {
       const pct = Math.min(100, (elapsed / dur) * 100);
       fill.style.width  = pct + '%';
-      count.textContent = Math.max(0, (dur - elapsed) / 1000).toFixed(1);
-      samp.textContent  = n;
+      setText(count, Math.max(0, (dur - elapsed) / 1000).toFixed(1));
+      setText(samp, n);
     });
 
     function abort() { controller.abort(); closeModal(); }
@@ -984,10 +1174,10 @@ function openCalibrateAllModal() {
     const controller = startCalibrationFor(targets, dur, (elapsed, counts) => {
       const pct = Math.min(100, (elapsed / dur) * 100);
       fill.style.width  = pct + '%';
-      count.textContent = Math.max(0, (dur - elapsed) / 1000).toFixed(1);
+      setText(count, Math.max(0, (dur - elapsed) / 1000).toFixed(1));
       for (const [slot, c] of counts) {
         const el = document.getElementById(`calCnt-${slot}`);
-        if (el) el.textContent = c;
+        if (el) setText(el, c);
       }
     });
 
@@ -1124,12 +1314,12 @@ function openNodeRecoveryModal(mac) {
       try {
         await step.fn();
         out.className = 'cal-note';
-        out.textContent = step.ok;
+        setText(out, step.ok);
         pushActivity('node', `${step.ok.slice(0, 2)} ${mac.slice(-5)}`);
         refreshNodes();
       } catch (e) {
         out.className = 'cal-note warn';
-        out.textContent = `ส่งคำสั่งไม่สำเร็จ: ${e.message} — ถ้าโหนดไม่ตอบเลย ให้ลอง "รีสตาร์ทวิทยุ" ในแท็บระบบ หรือปิด-เปิดโหนดด้วยมือ`;
+        setText(out, `ส่งคำสั่งไม่สำเร็จ: ${e.message} — ถ้าโหนดไม่ตอบเลย ให้ลอง "รีสตาร์ทวิทยุ" ในแท็บระบบ หรือปิด-เปิดโหนดด้วยมือ`);
       } finally {
         btn.disabled = false; btn.textContent = label;
       }
@@ -1214,13 +1404,13 @@ function renderLibrary() {
   const total = state.sessions.length;
   const sizeBytes = state.sessions.reduce((a,s) => a + (s.bytes||0), 0);
 
-  $('libCount').textContent = total;
-  $('libSize').textContent  = fmtBytes(sizeBytes);
+  setText($('libCount'), total);
+  setText($('libSize'), fmtBytes(sizeBytes));
   if (state.hostStatus?.sd) {
-    $('libCard').textContent = `${state.hostStatus.sd.usedMB ?? '—'} / ${state.hostStatus.sd.cardMB ?? '—'} MB`;
+    setText($('libCard'), `${state.hostStatus.sd.usedMB ?? '—'} / ${state.hostStatus.sd.cardMB ?? '—'} MB`);
   }
 
-  $('cmpCount').textContent = state.ui.compareSet.size;
+  setText($('cmpCount'), state.ui.compareSet.size);
   $('btnCompareOpen').disabled = state.ui.compareSet.size !== 2;
 
   if (!filtered.length) {
@@ -1274,24 +1464,24 @@ function renderSystem() {
   // Driven entirely by the 1.5 s status poll — repainting it per frame is waste.
   if (!changed('system', `${state.ui.activeTab}|${h?.uptimeMs ?? ''}|${h?.heap ?? ''}|${h?.rx ?? ''}|${h?.dropped ?? ''}|${h?.wsClients ?? ''}|${state.measuredHz}`)) return;
   if (h) {
-    $('sysUp').textContent    = fmtClock(h.uptimeMs);
-    $('sysHeap').textContent  = `${(h.heap/1024).toFixed(0)} KB`;
-    $('sysPsram').textContent = h.psram ? `${(h.psram/1024).toFixed(0)} KB` : '—';
-    $('sysWs').textContent    = h.wsClients ?? 0;
-    $('sysRx').textContent    = h.rx ?? 0;
-    $('sysDrop').textContent  = h.dropped ?? 0;
+    setText($('sysUp'), fmtClock(h.uptimeMs));
+    setText($('sysHeap'), `${(h.heap/1024).toFixed(0)} KB`);
+    setText($('sysPsram'), h.psram ? `${(h.psram/1024).toFixed(0)} KB` : '—');
+    setText($('sysWs'), h.wsClients ?? 0);
+    setText($('sysRx'), h.rx ?? 0);
+    setText($('sysDrop'), h.dropped ?? 0);
     const used = h.sd?.usedMB ?? 0, card = h.sd?.cardMB ?? 0;
     const pct = card ? (used / card) * 100 : 0;
     const bar = $('sdBarFill');
     bar.style.width = `${pct}%`;
     bar.className = 'bar-fill' + (pct > 90 ? ' crit' : pct > 70 ? ' warn' : '');
-    $('sdUsedTxt').textContent = `${used} MB used`;
-    $('sdFreeTxt').textContent = `${Math.max(0, card - used)} MB free`;
+    setText($('sdUsedTxt'), `${used} MB used`);
+    setText($('sdFreeTxt'), `${Math.max(0, card - used)} MB free`);
   }
-  $('sysHz').textContent = `${state.measuredHz ?? 0} Hz`;
-  $('sysBw').textContent = `${(state.measuredKbps ?? 0).toFixed(1)} kbps`;
-  $('aboutBuild').textContent = $('buildStamp').textContent;
-  $('aboutUa').textContent    = navigator.userAgent;
+  setText($('sysHz'), `${state.measuredHz ?? 0} Hz`);
+  setText($('sysBw'), `${(state.measuredKbps ?? 0).toFixed(1)} kbps`);
+  setText($('aboutBuild'), $('buildStamp').textContent);
+  setText($('aboutUa'), navigator.userAgent);
   $('aboutUa').title          = navigator.userAgent;
 }
 
@@ -1355,12 +1545,12 @@ function setupTuning() {
   const ref = $('refrSlider'), refV = $('refrVal');
   if (thr) thr.addEventListener('input', () => {
     state.tuning.thresholdG = parseFloat(thr.value);
-    thrV.textContent = `${thr.value} g`;
+    setText(thrV, `${thr.value} g`);
     saveTuningCb?.();
   });
   if (ref) ref.addEventListener('input', () => {
     state.tuning.refractoryMs = parseInt(ref.value, 10);
-    refV.textContent = `${ref.value} ms`;
+    setText(refV, `${ref.value} ms`);
     saveTuningCb?.();
   });
 }
@@ -1398,7 +1588,7 @@ export function toast(msg, kind = '') {
   if (!stack) return;
   const el = document.createElement('div');
   el.className = `toast ${kind}`;
-  el.textContent = msg;
+  setText(el, msg);
   stack.appendChild(el);
   setTimeout(() => el.remove(), 3600);
 }
@@ -1418,6 +1608,13 @@ function openStrikeDetail(id) {
   const s = state.strikes.find(x => x.id === id);
   if (!s) return;
   const ctx = state.strikes.filter(x => x.slot === s.slot && Math.abs(x.id - id) <= 3);
+  const pose = s.pose;
+  const poseHasAngles = pose && Object.values(pose.angles || {}).some(Number.isFinite);
+  const poseLine = pose && poseHasAngles
+    ? `${SLOT_NAMES[pose.slot] || pose.side} · ${poseAnglesText(pose)} · Δเวลา≈${Math.round(pose.ageMs)} ms`
+    : pose
+      ? `${SLOT_NAMES[pose.slot] || pose.side} · พบเฟรมกล้อง แต่ข้อต่อที่ต้องใช้ถูกบัง · Δเวลา≈${Math.round(pose.ageMs)} ms`
+      : 'ไม่พบเฟรมกล้องที่ชัดเจนภายใน ±250 ms (ค่าเวลาโดยประมาณ)';
   openModal(`
     <div class="dlg-head">
       <div class="dlg-title">STRIKE #${s.id} · ${fmtType(s.type)}</div>
@@ -1440,6 +1637,10 @@ function openStrikeDetail(id) {
       <div class="stat"><div class="stat-lbl">ROUND</div><div class="stat-val mono">R${s.round || '—'}</div></div>
       <div class="stat"><div class="stat-lbl">SESSION TIME</div><div class="stat-val mono" style="font-size:22px">${fmtClock(s.sessionMs)}</div></div>
       <div class="stat"><div class="stat-lbl">RECOVERY</div><div class="stat-val mono" style="font-size:22px">${fmtMs(s.recoverMs)}</div></div>
+      <div class="stat span2"><div class="stat-lbl">MOTION CAPTURE · ${pose ? 'POSE MATCHED' : 'NO POSE MATCH'}</div>
+        <div class="stat-val mono" style="font-size:18px">${poseLine}</div>
+        <div class="dim small">กล้องเป็นมุมประกอบ; แรง ${s.peakG.toFixed(1)} g มาจาก IMU ของ slot นี้</div>
+      </div>
     </div>
     <div class="detail-ctx">
       <div style="font-weight:600;letter-spacing:.14em;color:var(--paper-3);margin-bottom:6px">NEIGHBOURS ON SAME SLOT</div>
@@ -1660,7 +1861,7 @@ function renderReplay(body, id, meta, session, setPlayer) {
   let curIdx = -1;
   function update(tMs) {
     seek.value = String(Math.round(tMs));
-    elTime.textContent = `${fmtClock(tMs)} / ${fmtClock(dur)}`;
+    setText(elTime, `${fmtClock(tMs)} / ${fmtClock(dur)}`);
     draw(tMs);
 
     let idx = -1;
@@ -1695,7 +1896,7 @@ function renderReplay(body, id, meta, session, setPlayer) {
 
   btnPlay.addEventListener('click', () => {
     player.toggle();
-    btnPlay.textContent = player.playing ? '⏸ หยุด' : '▶ เล่น';
+    setText(btnPlay, player.playing ? '⏸ หยุด' : '▶ เล่น');
     btnPlay.classList.toggle('is-playing', player.playing);
   });
   document.getElementById('rpPrev').addEventListener('click', () => player.step(-1));
@@ -1821,14 +2022,14 @@ export function openFactoryResetModal() {
     // Two-step: the first press only arms it. One stray tap must not wipe a rig.
     if (!armed) {
       armed = true;
-      go.textContent = 'กดอีกครั้งเพื่อยืนยัน ⚠';
+      setText(go, 'กดอีกครั้งเพื่อยืนยัน ⚠');
       setTimeout(() => { if (armed) { armed = false; go.textContent = 'รีเซ็ตอุปกรณ์'; } }, 5000);
       return;
     }
     const wipeSessions = document.getElementById('frSessions').checked;
     const wipeModel    = document.getElementById('frModel').checked;
     go.disabled = true;
-    go.textContent = 'กำลังรีเซ็ต…';
+    setText(go, 'กำลังรีเซ็ต…');
     try {
       const res = await api.factoryReset({ wipeSessions, wipeModel });
       persist.clearAll();                       // browser half of the reset
@@ -1846,7 +2047,7 @@ export function openFactoryResetModal() {
     } catch (err) {
       go.disabled = false;
       armed = false;
-      go.textContent = 'รีเซ็ตอุปกรณ์';
+      setText(go, 'รีเซ็ตอุปกรณ์');
       toast(`รีเซ็ตไม่สำเร็จ: ${err.message}`, 'warn');
     }
   });
@@ -1885,8 +2086,22 @@ function escapeAttr(s) { return escapeHtml(s).replace(/"/g, '&quot;'); }
 
 // ───── MASTER RENDER ─────
 export function renderAll() {
+  // Nothing may move while a finger is down.
+  //
+  // Measured on the device with ?touchdebug=1: pointerdown ✓ touchstart ✓
+  // pointerup ✓ touchend ✓ click ✗, finger travel 0px, held 168ms. Every event
+  // arrived and the finger never moved — so the browser cancelled the click
+  // because the ELEMENT moved out from under it. A 168 ms hold spans ten frames
+  // of renderAll(), and renderMixer()/renderNodes() rebuild their subtrees
+  // outside the changed() guard, reflowing everything below them.
+  //
+  // Guarding changed() was not enough because not every renderer goes through
+  // it. Guarding here is: one place, covers every renderer that exists now or
+  // later, and costs a tap's worth of staleness — under a fifth of a second.
   renderTopbar();
   renderDial();
+  renderHero();
+  renderCombo();
   renderStats();
   renderBody();
   renderMixer();
@@ -1894,6 +2109,7 @@ export function renderAll() {
   renderGoals();
   renderPerRound();
   renderActivity();
+  renderRecent();
   renderMarkers();
   renderTimeline();
   renderStrikeLog();
@@ -1912,6 +2128,11 @@ export function initUi(activeApi) {
   setupTuning();
   setupLibrarySearch();
   $('btnEditGoals')?.addEventListener('click', openGoalsModal);
+  $('btnScoreHelp')?.addEventListener('click', openScoringHelpModal);
+  $('btnAllHistory')?.addEventListener('click', () => {
+    document.querySelector('.tab[data-tab="library"]')?.click();
+    document.querySelector('.rail-right')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  });
   $('btnHelp')?.addEventListener('click', openShortcutsModal);
   $('btnCalAll')?.addEventListener('click', openCalibrateAllModal);
   $('btnRescanNodes')?.addEventListener('click', () => {
@@ -1919,6 +2140,11 @@ export function initUi(activeApi) {
     toast('กำลังค้นหาโหนดใหม่…', 'ok');
   });
   $('btnFactoryReset')?.addEventListener('click', openFactoryResetModal);
+  // ── topbar connection indicator ──
+  $('conn')?.addEventListener('click', () => {
+    document.querySelector('.tab[data-tab="system"]')?.click();
+    document.querySelector('.rail-right')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  });
 
   // ── recovery controls (SYSTEM tab) ──
   $('btnReconnectWs')?.addEventListener('click', () => {
@@ -1950,7 +2176,10 @@ export function initUi(activeApi) {
       b.disabled = false; b.textContent = label;
     }
   });
-  $('buildStamp').textContent = new Date().toISOString().slice(0,10).replace(/-/g,'');
+  // Already stamped into the markup by vite (see vite.config.js) so that
+  // freshness.js can read it out of a fetched document without running it.
+  // Only fill in when the source is served unbuilt, where it reads 'dev'.
+  if ($('buildStamp').textContent.trim() === 'dev') $('buildStamp').textContent = BUILD_ID;
 }
 
 // Re-export modal helpers

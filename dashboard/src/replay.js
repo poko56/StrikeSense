@@ -13,7 +13,7 @@
 // A 15-minute session therefore costs ~9000 tiny buckets instead of ~57 MB.
 
 import { SLOT_NAMES, SLOT_SHORT } from './state.js';
-import { aiReady, aiWindowShape, aiClassifyRaw, aiDetectParams, aiStrikeNorm } from './aimodel.js';
+import { aiReady, aiWindowShape, aiClassifyRaw, aiDetectParams, aiStrikeNorm, aiPostPeak } from './aimodel.js';
 import { createDetector } from './detector.js';
 import { scoreStrike } from './strikescore.js';
 
@@ -86,6 +86,27 @@ export async function loadSession(url, tuning, onProgress, signal) {
     return aiClassifyRaw(win, slot);
   };
 
+  // Strikes whose window is still filling with follow-through. Mirrors the live
+  // path in analyzer.js — the model is trained on windows that run past the
+  // impact, so naming has to wait for those samples.
+  const pending = new Map();          // slot -> { endBack, ev }
+
+  const resolvePending = (slot) => {
+    const p = pending.get(slot);
+    if (!p) return;
+    const back = p.endBack - aiPostPeak();
+    if (back < 0) return;
+    pending.delete(slot);
+    const ai = classifyAi(slot, back);
+    if (!ai || !ai.label) return;
+    p.ev.type = ai.label; p.ev.byAi = true; p.ev.conf = ai.conf;
+    const sc = scoreStrike({ peakG: p.ev.peakG, peakDps: p.ev.peakDps },
+                           aiStrikeNorm(ai.label));
+    p.ev.score = sc.score; p.ev.scorePower = sc.power;
+    p.ev.scoreSpeed = sc.speed; p.ev.scoreRef = sc.ref;
+    aiNamed++;
+  };
+
   const dec = new TextDecoder();
   const reader = res.body.getReader();
 
@@ -117,23 +138,23 @@ export async function loadSession(url, tuning, onProgress, signal) {
         // in the same column as model output made the whole list untrustworthy.
         // No model, or the model says this was not a technique → leave it unnamed
         // and say so, rather than inventing a label.
-        const ai = classifyAi(curSlot, hit.endBack);
-        if (ai && ai.label) aiNamed++;
-        // Same scoring rule as the live view, so replaying a session shows the
-        // numbers the coach saw at the time rather than a second opinion.
-        const label = (ai && ai.label) || null;
-        const sc = scoreStrike({ peakG: hit.peakG, peakDps: hit.peakDps }, aiStrikeNorm(label));
-        strikes.push({
+        // Named a few frames later, once the follow-through has streamed in — the
+        // same rule the live view follows, so a replay shows what the coach saw.
+        const sc0 = scoreStrike({ peakG: hit.peakG, peakDps: hit.peakDps }, null);
+        const ev = {
           id: strikes.length + 1,
           tMs: t,
           slot: curSlot,
           peakG: hit.peakG,
           peakDps: hit.peakDps,
-          type: label,
-          byAi: !!label,
-          conf: ai ? ai.conf : 0,
-          score: sc.score, scorePower: sc.power, scoreSpeed: sc.speed, scoreRef: sc.ref,
-        });
+          type: null,
+          byAi: false,
+          conf: 0,
+          score: sc0.score, scorePower: sc0.power, scoreSpeed: sc0.speed, scoreRef: sc0.ref,
+        };
+        strikes.push(ev);
+        pending.set(curSlot, { endBack: hit.endBack, ev });
+        resolvePending(curSlot);
         perSlot[curSlot]++;
         sumG += hit.peakG;
         if (hit.peakG > peakG) peakG = hit.peakG;
@@ -177,6 +198,8 @@ export async function loadSession(url, tuning, onProgress, signal) {
     if (key !== curKey) { flushFrame(); curKey = key; curSlot = slot; curT = t; }
 
     pushRaw(slot, ax, ay, az, gx, gy, gz);
+    const pend = pending.get(slot);
+    if (pend) { pend.endBack++; resolvePending(slot); }
     curN++;
     if (a > curMaxA) curMaxA = a;
     if (w > curMaxW) curMaxW = w;

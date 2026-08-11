@@ -23,6 +23,7 @@
 #include <Adafruit_NeoPixel.h>
 #include <Arduino.h>
 #include <ArduinoJson.h>
+#include <esp_https_server.h>
 #include <ESPAsyncWebServer.h>
 #include <Preferences.h>
 #include <SD.h>
@@ -33,15 +34,43 @@
 #include <esp_wifi.h>
 #include <time.h>
 
+// esp_http_server and ESPAsyncWebServer both name their method enums HTTP_GET,
+// etc.  Include the native header first (which tells ESPAsyncWebServer not to
+// import its names globally), retain native constants under explicit names, and
+// preserve the existing Async route source below with these narrow aliases.
+static constexpr httpd_method_t IDF_HTTP_DELETE =
+    static_cast<httpd_method_t>(HTTP_DELETE);
+static constexpr httpd_method_t IDF_HTTP_GET = static_cast<httpd_method_t>(HTTP_GET);
+static constexpr httpd_method_t IDF_HTTP_POST =
+    static_cast<httpd_method_t>(HTTP_POST);
+#define HTTP_DELETE AsyncWebRequestMethod::HTTP_DELETE
+#define HTTP_GET AsyncWebRequestMethod::HTTP_GET
+#define HTTP_POST AsyncWebRequestMethod::HTTP_POST
+
 // ============================================================
 //  CONFIG
 // ============================================================
 #define AP_SSID "StrikeSense"
 #define AP_PASSWORD "muaythai123" // >= 8 chars
 #define AP_CHANNEL 1              // MUST match STRIKESENSE_ESPNOW_CHANNEL
+// TLS consumes roughly 50 KiB of scarce internal RAM per browser.  This rig's
+// secure transport is intentionally one-coach-at-a-time: a second phone can
+// otherwise consume the WSS/API pair and make both dashboards flap offline.
+#define AP_MAX_CLIENTS 1
 
 #define HTTP_PORT 80
+#define HTTPS_PORT 443
 #define WS_PATH "/ws"
+
+// TLS material is deliberately provisioned on the SD card, never compiled into
+// firmware or checked into source control.  The leaf certificate must contain
+// a SAN for the address/name the phone opens.  With a public certificate use a
+// DNS name in HTTPS_HOST_PATH; without it the legacy Local-CA IP setup remains
+// available at 192.168.4.1.
+#define HTTPS_CERT_PATH "/tls/server-cert.pem"
+#define HTTPS_KEY_PATH "/tls/server-key.pem"
+#define HTTPS_HOST_PATH "/tls/hostname.txt"
+#define HTTPS_DEFAULT_HOST "192.168.4.1"
 
 // Upper bound on live-stream clients. Only a backstop, NOT the zombie defence —
 // see WebServerApp::loop(). Keep it well above the real client count: a phone
@@ -1237,6 +1266,1111 @@ static volatile bool g_pagePending = false;
 static uint32_t g_pageOk = 0;
 static uint32_t g_pageStalled = 0;
 
+// ── Native HTTPS/WSS front end ─────────────────────────────────────────────
+// ESPAsyncWebServer is intentionally left on port 80: its AsyncTCP transport
+// in this build has no server-side TLS support.  esp_https_server is the
+// Espressif-native TLS listener on :443.  It serves the same embedded UI and
+// relays the existing REST handlers through a deliberately bounded loopback
+// proxy, so the two transports cannot silently diverge.
+static httpd_handle_t g_https = nullptr;
+// Optional canonical DNS name read from HTTPS_HOST_PATH.  It affects only
+// redirects/logging; TLS identity remains entirely the certificate SAN.
+static String g_httpsCanonicalHost = HTTPS_DEFAULT_HOST;
+// `max_open_sockets` is the number of *client sessions*.  ESP-IDF allocates
+// its three listen/control sockets separately.  Keep exactly two TLS clients:
+// one long-lived WSS stream and one serialized REST request.  More sessions
+// exhaust the Main Node's internal heap during TLS handshakes.
+static constexpr size_t HTTPS_MAX_OPEN_SOCKETS = 2; // WSS + one HTTPS request
+static constexpr size_t HTTPS_MAX_URI_HANDLERS = 8;
+static constexpr size_t HTTPS_PEM_MAX_BYTES = 16 * 1024;
+static constexpr size_t HTTPS_WS_SNAPSHOT_MAX = 2048;
+static constexpr size_t HTTPS_PROXY_URI_MAX = 768;
+// API headers are small and bounded.  Keeping this modest is important because
+// TLS itself needs internal RAM for every active client.
+static constexpr size_t HTTPS_PROXY_HEADER_MAX = 2048;
+static constexpr size_t HTTPS_PROXY_IO_BYTES = 2048;
+static constexpr size_t HTTPS_PROXY_MAX_REQUEST_BYTES = 2 * 1024 * 1024;
+static constexpr uint32_t HTTPS_PROXY_MAX_RESPONSE_BYTES = 8 * 1024 * 1024;
+static constexpr uint32_t HTTPS_PROXY_TIMEOUT_MS = 8000;
+
+// Native HTTPD runs URI handlers serially on its own task.  Keep the two large
+// proxy header buffers out of that task's stack: together with response parser
+// locals and the 2 KiB stream buffer, stack-local 4 KiB headers could overflow
+// the 12 KiB HTTPS task during an ordinary /api/status response.
+struct HttpsProxyScratch {
+  char requestHead[HTTPS_PROXY_HEADER_MAX];
+  char responseHead[HTTPS_PROXY_HEADER_MAX];
+  uint8_t io[HTTPS_PROXY_IO_BYTES];
+};
+// The Main Node requires OPI PSRAM.  Keep streaming scratch there so a request
+// cannot steal the internal heap needed for two simultaneous TLS sessions.
+static EXT_RAM_BSS_ATTR HttpsProxyScratch g_httpsProxyScratch;
+
+// These are the only SD files exposed by the HTTPS listener.  The cards used
+// on rigs may contain sessions and private TLS material; never turn this into
+// a general SD file server.
+static const char *const HTTPS_MOCAP_ASSETS[] = {
+    "/mocap/mediapipe/0.10.35/wasm/vision_wasm_internal.js",
+    "/mocap/mediapipe/0.10.35/wasm/vision_wasm_internal.wasm",
+    "/mocap/mediapipe/0.10.35/wasm/vision_wasm_nosimd_internal.js",
+    "/mocap/mediapipe/0.10.35/wasm/vision_wasm_nosimd_internal.wasm",
+    "/mocap/mediapipe/0.10.35/models/pose_landmarker_lite.task",
+};
+static constexpr size_t HTTPS_MOCAP_ASSET_COUNT =
+    sizeof(HTTPS_MOCAP_ASSETS) / sizeof(HTTPS_MOCAP_ASSETS[0]);
+
+static volatile uint8_t g_httpsWsClients = 0;
+static volatile bool g_httpsWsTxPending = false;
+static uint32_t g_httpsWsDropped = 0;
+static portMUX_TYPE g_httpsWsMux = portMUX_INITIALIZER_UNLOCKED;
+
+struct HttpsWsSnapshot {
+  size_t len;
+  uint8_t data[HTTPS_WS_SNAPSHOT_MAX];
+};
+
+static bool httpsExpired(uint32_t deadlineMs) {
+  return (int32_t)(millis() - deadlineMs) >= 0;
+}
+
+static void httpsSetWsClients(uint8_t count) {
+  taskENTER_CRITICAL(&g_httpsWsMux);
+  g_httpsWsClients = count;
+  taskEXIT_CRITICAL(&g_httpsWsMux);
+}
+
+static size_t httpsWsClientCount() {
+  taskENTER_CRITICAL(&g_httpsWsMux);
+  const uint8_t count = g_httpsWsClients;
+  taskEXIT_CRITICAL(&g_httpsWsMux);
+  return count;
+}
+
+static void httpsNoteWsDrop() {
+  taskENTER_CRITICAL(&g_httpsWsMux);
+  ++g_httpsWsDropped;
+  taskEXIT_CRITICAL(&g_httpsWsMux);
+}
+
+static uint32_t httpsWsDroppedCount() {
+  taskENTER_CRITICAL(&g_httpsWsMux);
+  const uint32_t count = g_httpsWsDropped;
+  taskEXIT_CRITICAL(&g_httpsWsMux);
+  return count;
+}
+
+static bool httpsWsHasClients() {
+  return g_https != nullptr && httpsWsClientCount() != 0;
+}
+
+// How many of the two TLS client sockets are occupied right now.
+//
+// Printed with every [STATS] line because it is the one number that tells the
+// Offline bug apart from a radio problem: `tls=2/2 ws=0` means REST held both
+// slots and the WebSocket handshake had nowhere to land, while `tls=0/2 ws=0`
+// means the phone never reached the listener at all.
+static size_t httpsSessionCount() {
+  if (!g_https)
+    return 0;
+  int fds[HTTPS_MAX_OPEN_SOCKETS] = {};
+  size_t fdCount = HTTPS_MAX_OPEN_SOCKETS;
+  if (httpd_get_client_list(g_https, &fdCount, fds) != ESP_OK)
+    return 0;
+  return fdCount;
+}
+
+static void httpsCommonHeaders(httpd_req_t *req) {
+  httpd_resp_set_hdr(req, "X-Content-Type-Options", "nosniff");
+  httpd_resp_set_hdr(req, "X-StrikeSense-Secure-Mode",
+                     "https-wss-loopback-proxy");
+}
+
+// `Connection: close` is only a request to the browser; native HTTPD otherwise
+// keeps the TLS session alive until that browser later sends another packet.
+// This rig has exactly two TLS client slots, so actively schedule the close
+// after each one-shot document/API/asset response.  The close is queued on the
+// HTTPD task and therefore runs only after the handler has finished sending.
+static void httpsCloseAfterResponse(httpd_req_t *req) {
+  if (!g_https || !req)
+    return;
+  const int fd = httpd_req_to_sockfd(req);
+  if (fd < 0)
+    return;
+  const esp_err_t err = httpd_sess_trigger_close(g_https, fd);
+  if (err != ESP_OK)
+    Serial.printf("[HTTPS] close fd=%d failed: 0x%lx\n", fd,
+                  (unsigned long)err);
+}
+
+// One line per secure request: which socket served it and how full the pool was
+// when it arrived.  Written because "the badge says Offline" cannot otherwise be
+// told apart from "the phone is serving a cached dashboard and never asked us
+// for anything".
+static void httpsLogRequest(httpd_req_t *req, const char *what) {
+  if (!req)
+    return;
+  Serial.printf("[HTTPS] fd=%d %s tls=%u/%u iheap=%lu\n",
+                httpd_req_to_sockfd(req), what,
+                (unsigned)httpsSessionCount(),
+                (unsigned)HTTPS_MAX_OPEN_SOCKETS,
+                (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+}
+
+// Keep the live stream at the head of the server's least-recently-used list.
+//
+// A server-push WebSocket receives nothing, so ESP-IDF's LRU bookkeeping ages
+// it as if it were idle — which is why LRU eviction was switched off earlier in
+// this debug, after it kept choosing the stream and causing an Offline/Live
+// loop.  Marking the socket used on every push inverts that: the stream becomes
+// the newest entry and the eviction candidate is always a REST session instead.
+static void httpsTouchWsSession(int fd) {
+  if (g_https && fd >= 0)
+    httpd_sess_update_lru_counter(g_https, fd);
+}
+
+static esp_err_t httpsReply(httpd_req_t *req, const char *status,
+                            const char *body) {
+  // Every proxy failure ends here. Without this line a 502 is visible only as a
+  // toast on the phone ("invalid legacy HTTP response"), with no way to tell
+  // whether the legacy server refused the connection, timed out, or simply had
+  // no memory left to build the response.
+  if (status && status[0] == '5')
+    Serial.printf("[HTTPS] %s uri=%s %s tls=%u/%u iheap=%lu\n", status,
+                  req && req->uri ? req->uri : "?", body ? body : "",
+                  (unsigned)httpsSessionCount(),
+                  (unsigned)HTTPS_MAX_OPEN_SOCKETS,
+                  (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+  httpd_resp_set_status(req, status);
+  httpd_resp_set_type(req, "application/json; charset=utf-8");
+  httpd_resp_set_hdr(req, "Connection", "close");
+  httpsCommonHeaders(req);
+  const esp_err_t err = httpd_resp_send(req, body, HTTPD_RESP_USE_STRLEN);
+  httpsCloseAfterResponse(req);
+  return err;
+}
+
+static bool httpsHeaderValueSafe(const char *value) {
+  if (!value)
+    return false;
+  for (const unsigned char *p = reinterpret_cast<const unsigned char *>(value);
+       *p; ++p) {
+    // Response/header injection is never worth supporting.  The proxy only
+    // relays ordinary printable HTTP field values from the local legacy server.
+    if (*p < 0x20 || *p > 0x7e)
+      return false;
+  }
+  return true;
+}
+
+static bool httpsCopyHeaderValue(char *dst, size_t dstSize, const char *src) {
+  if (!dst || dstSize == 0 || !src)
+    return false;
+  const size_t n = strlen(src);
+  if (n >= dstSize || !httpsHeaderValueSafe(src))
+    return false;
+  memcpy(dst, src, n + 1);
+  return true;
+}
+
+static bool httpsHeaderNameIs(const char *name, const char *expected) {
+  while (*name && *expected) {
+    char a = *name++;
+    char b = *expected++;
+    if (a >= 'A' && a <= 'Z')
+      a = char(a - 'A' + 'a');
+    if (b >= 'A' && b <= 'Z')
+      b = char(b - 'A' + 'a');
+    if (a != b)
+      return false;
+  }
+  return *name == 0 && *expected == 0;
+}
+
+static char *httpsTrimHeaderValue(char *value) {
+  while (*value == ' ' || *value == '\t')
+    ++value;
+  char *end = value + strlen(value);
+  while (end > value && (end[-1] == ' ' || end[-1] == '\t'))
+    --end;
+  *end = 0;
+  return value;
+}
+
+static bool httpsParseContentLength(const char *value, uint32_t *out) {
+  if (!value || !*value || !out)
+    return false;
+  uint64_t parsed = 0;
+  for (const char *p = value; *p; ++p) {
+    if (*p < '0' || *p > '9')
+      return false;
+    parsed = parsed * 10 + (uint32_t)(*p - '0');
+    if (parsed > UINT32_MAX)
+      return false;
+  }
+  *out = (uint32_t)parsed;
+  return true;
+}
+
+static bool httpsAppend(char *dst, size_t dstSize, size_t *used,
+                        const char *text) {
+  if (!dst || !used || !text)
+    return false;
+  const size_t n = strlen(text);
+  if (*used + n >= dstSize)
+    return false;
+  memcpy(dst + *used, text, n);
+  *used += n;
+  dst[*used] = 0;
+  return true;
+}
+
+static bool httpsAppendForwardedHeader(char *dst, size_t dstSize, size_t *used,
+                                       const char *name, const char *value) {
+  if (!value || !value[0])
+    return true;
+  return httpsAppend(dst, dstSize, used, name) &&
+         httpsAppend(dst, dstSize, used, ": ") &&
+         httpsAppend(dst, dstSize, used, value) &&
+         httpsAppend(dst, dstSize, used, "\r\n");
+}
+
+static bool httpsRawSendAll(httpd_req_t *req, const uint8_t *data,
+                            size_t dataLen) {
+  while (dataLen) {
+    const int sent = httpd_send(req, reinterpret_cast<const char *>(data),
+                                dataLen);
+    if (sent <= 0)
+      return false;
+    data += sent;
+    dataLen -= (size_t)sent;
+  }
+  return true;
+}
+
+static bool httpsClientWriteAll(WiFiClient &client, const uint8_t *data,
+                                size_t dataLen, uint32_t deadlineMs) {
+  while (dataLen) {
+    if (httpsExpired(deadlineMs))
+      return false;
+    const size_t written = client.write(data, dataLen);
+    if (written == 0) {
+      delay(1);
+      continue;
+    }
+    data += written;
+    dataLen -= written;
+  }
+  return true;
+}
+
+static bool httpsReadUpstreamByte(WiFiClient &client, char *out,
+                                  uint32_t deadlineMs) {
+  while (!client.available()) {
+    if (!client.connected() || httpsExpired(deadlineMs))
+      return false;
+    delay(1);
+  }
+  const int byteRead = client.read();
+  if (byteRead < 0)
+    return false;
+  *out = (char)byteRead;
+  return true;
+}
+
+static bool httpsReadUpstreamLine(WiFiClient &client, char *out,
+                                  size_t outSize, uint32_t deadlineMs) {
+  if (!out || outSize < 2)
+    return false;
+  size_t n = 0;
+  for (;;) {
+    char c = 0;
+    if (!httpsReadUpstreamByte(client, &c, deadlineMs))
+      return false;
+    if (c == '\n') {
+      out[n] = 0;
+      return true;
+    }
+    if (c == '\r')
+      continue;
+    if ((unsigned char)c < 0x20 || (unsigned char)c > 0x7e || n + 1 >= outSize)
+      return false;
+    out[n++] = c;
+  }
+}
+
+static bool httpsBuildProxyUri(httpd_req_t *req, char *out, size_t outSize) {
+  if (!req || !out || outSize < 8)
+    return false;
+  const size_t rawLen = strnlen(req->uri, outSize);
+  if (rawLen == 0 || rawLen >= outSize)
+    return false;
+  memcpy(out, req->uri, rawLen + 1);
+
+  // ESP-IDF versions differ on whether req->uri retains the query string.
+  // Preserve it if present; otherwise obtain it from the dedicated API.
+  if (!strchr(out, '?')) {
+    const size_t queryLen = httpd_req_get_url_query_len(req);
+    if (queryLen) {
+      if (rawLen + queryLen + 2 > outSize)
+        return false;
+      out[rawLen] = '?';
+      if (httpd_req_get_url_query_str(req, out + rawLen + 1,
+                                      outSize - rawLen - 1) != ESP_OK)
+        return false;
+    }
+  }
+  if ((strncmp(out, "/api/", 5) != 0 && strcmp(out, "/api") != 0))
+    return false;
+  // A URI is interpolated into the loopback HTTP request line, so it is stricter
+  // than a safe header value: no whitespace/control character can be allowed.
+  for (const unsigned char *p = reinterpret_cast<const unsigned char *>(out);
+       *p; ++p) {
+    if (*p <= 0x20 || *p > 0x7e)
+      return false;
+  }
+  return true;
+}
+
+static bool httpsGetRequestHeader(httpd_req_t *req, const char *name,
+                                  char *out, size_t outSize) {
+  if (!out || outSize == 0)
+    return false;
+  out[0] = 0;
+  const size_t valueLen = httpd_req_get_hdr_value_len(req, name);
+  if (valueLen == 0)
+    return true;
+  if (valueLen >= outSize ||
+      httpd_req_get_hdr_value_str(req, name, out, outSize) != ESP_OK)
+    return false;
+  return httpsHeaderValueSafe(out);
+}
+
+static bool httpsConnectLegacy(WiFiClient &upstream) {
+  // Some Arduino core builds do not expose 127.0.0.1 through esp-netif.  Try
+  // loopback first, then the rig AP address; neither target is client supplied.
+  if (upstream.connect(IPAddress(127, 0, 0, 1), HTTP_PORT, 1200))
+    return true;
+  upstream.stop();
+  return upstream.connect(WiFi.softAPIP(), HTTP_PORT, 1200);
+}
+
+static bool httpsSendRequestBody(httpd_req_t *req, WiFiClient &upstream,
+                                 uint32_t deadlineMs) {
+  uint8_t *io = g_httpsProxyScratch.io;
+  size_t remaining = req->content_len;
+  while (remaining) {
+    if (httpsExpired(deadlineMs))
+      return false;
+    const size_t want = remaining < sizeof(io) ? remaining : sizeof(io);
+    const int received = httpd_req_recv(req, reinterpret_cast<char *>(io), want);
+    if (received == HTTPD_SOCK_ERR_TIMEOUT)
+      continue;
+    if (received <= 0)
+      return false;
+    if (!httpsClientWriteAll(upstream, io, (size_t)received, deadlineMs))
+      return false;
+    remaining -= (size_t)received;
+  }
+  return true;
+}
+
+static bool httpsSendUpstreamBody(httpd_req_t *req, WiFiClient &upstream,
+                                  uint32_t remaining,
+                                  uint32_t deadlineMs) {
+  uint8_t *io = g_httpsProxyScratch.io;
+  while (remaining) {
+    if (httpsExpired(deadlineMs))
+      return false;
+    int available = upstream.available();
+    if (available <= 0) {
+      if (!upstream.connected())
+        return false;
+      delay(1);
+      continue;
+    }
+    size_t want = remaining < sizeof(io) ? remaining : sizeof(io);
+    if ((size_t)available < want)
+      want = (size_t)available;
+    const int received = upstream.read(io, want);
+    if (received <= 0)
+      return false;
+    if (!httpsRawSendAll(req, io, (size_t)received))
+      return false;
+    remaining -= (uint32_t)received;
+  }
+  return true;
+}
+
+static esp_err_t httpsDashboardHandler(httpd_req_t *req) {
+  // Log the path, not just "dashboard": `/` and `/new` are the same document
+  // but not the same cache entry, and which one a phone actually asked for is
+  // the difference between a fresh build and a stale one.
+  httpsLogRequest(req, req->uri);
+  const uint32_t startedMs = millis();
+  g_streamQuietUntilMs = startedMs + STREAM_QUIET_MS;
+  g_pageStartMs = startedMs;
+  g_pagePending = true;
+
+  httpd_resp_set_type(req, "text/html; charset=utf-8");
+  httpd_resp_set_hdr(req, "Content-Encoding", "gzip");
+  httpd_resp_set_hdr(req, "Cache-Control", "no-cache, no-store, must-revalidate");
+  httpd_resp_set_hdr(req, "Connection", "close");
+  httpsCommonHeaders(req);
+  const esp_err_t err = httpd_resp_send(
+      req, reinterpret_cast<const char *>(DASHBOARD_HTML_GZ),
+      DASHBOARD_HTML_GZ_LEN);
+  httpsCloseAfterResponse(req);
+  g_streamQuietUntilMs = 0;
+  g_pagePending = false;
+  if (err == ESP_OK)
+    ++g_pageOk;
+  else
+    ++g_pageStalled;
+  DLOG("HTTPS", "dashboard %s in %lu ms", err == ESP_OK ? "sent" : "failed",
+       (unsigned long)(millis() - startedMs));
+  return err;
+}
+
+static bool httpsMocapAssetAllowed(const char *path) {
+  for (size_t i = 0; i < HTTPS_MOCAP_ASSET_COUNT; ++i) {
+    if (strcmp(path, HTTPS_MOCAP_ASSETS[i]) == 0)
+      return true;
+  }
+  return false;
+}
+
+static const char *httpsMocapContentType(const char *path) {
+  if (strstr(path, ".js"))
+    return "text/javascript; charset=utf-8";
+  if (strstr(path, ".wasm"))
+    return "application/wasm";
+  return "application/octet-stream"; // MediaPipe .task
+}
+
+static esp_err_t httpsMocapAssetHandler(httpd_req_t *req) {
+  httpsLogRequest(req, "mocap asset");
+  // Query variations are not an additional public surface: the exact five
+  // manifest paths above are all that can be read from SD through HTTPS.
+  if (httpd_req_get_url_query_len(req) != 0 ||
+      !httpsMocapAssetAllowed(req->uri))
+    return httpsReply(req, "404 Not Found", "{\"error\":\"mocap asset not found\"}");
+  if (!SdLogger::isReady())
+    return httpsReply(req, "503 Service Unavailable", "{\"error\":\"sd unavailable\"}");
+
+  File asset = SD.open(req->uri, FILE_READ);
+  if (!asset || asset.isDirectory()) {
+    if (asset)
+      asset.close();
+    return httpsReply(req, "404 Not Found", "{\"error\":\"mocap asset missing\"}");
+  }
+
+  httpd_resp_set_type(req, httpsMocapContentType(req->uri));
+  httpd_resp_set_hdr(req, "Cache-Control", "public, max-age=31536000, immutable");
+  // A MediaPipe asset is a complete one-shot transfer.  Release the scarce TLS
+  // client slot as soon as it finishes instead of leaving it idle beside WSS.
+  httpd_resp_set_hdr(req, "Connection", "close");
+  httpsCommonHeaders(req);
+  uint8_t io[HTTPS_PROXY_IO_BYTES];
+  esp_err_t err = ESP_OK;
+  while (asset.available()) {
+    const size_t got = asset.read(io, sizeof(io));
+    if (got == 0) {
+      err = ESP_FAIL;
+      break;
+    }
+    err = httpd_resp_send_chunk(req, reinterpret_cast<const char *>(io), got);
+    if (err != ESP_OK)
+      break;
+  }
+  asset.close();
+  if (err == ESP_OK)
+    err = httpd_resp_send_chunk(req, nullptr, 0);
+  httpsCloseAfterResponse(req);
+  return err;
+}
+
+static esp_err_t httpsSecureStatusHandler(httpd_req_t *req) {
+  // `build` is the stamp of the dashboard this firmware has embedded. A phone
+  // that cached the page before a flash keeps running the old JavaScript and
+  // cannot tell — the document itself is what is stale. Naming the served build
+  // in a few dozen bytes of JSON lets the page notice without re-downloading
+  // 400 KB over TLS to find out.
+  static const char STATUS[] =
+      "{\"https\":true,\"wss\":true,\"build\":\"" DASHBOARD_BUILD_ID "\","
+      "\"apiProxy\":{\"mode\":\"loopback\","
+      "\"methods\":[\"GET\",\"POST\",\"DELETE\"],\"requestMaxBytes\":2097152,"
+      "\"responseMaxBytes\":8388608,\"chunkedUpstream\":\"rejected\"},"
+      "\"mocapAssets\":\"strict-sd-allowlist\",\"certificatePath\":\"/tls/server-cert.pem\"}";
+  // Only a dashboard carrying the build-stamp check asks for this. Its presence
+  // in the log is therefore proof that the phone is running the current build,
+  // which no other request can establish.
+  httpsLogRequest(req, "secure-status (fresh build)");
+  httpd_resp_set_type(req, "application/json; charset=utf-8");
+  httpd_resp_set_hdr(req, "Connection", "close");
+  httpsCommonHeaders(req);
+  const esp_err_t err = httpd_resp_send(req, STATUS, sizeof(STATUS) - 1);
+  httpsCloseAfterResponse(req);
+  return err;
+}
+
+static esp_err_t httpsWsHandler(httpd_req_t *req) {
+  if (req->method == IDF_HTTP_GET) {
+    // The native server completes the upgrade before this callback.  A precise
+    // count is refreshed in the queued sender; setting one here ensures the
+    // first IMU batch is not lost between handshake and that refresh.
+    httpsSetWsClients(1);
+    httpsLogRequest(req, "ws upgrade");
+    httpsTouchWsSession(httpd_req_to_sockfd(req));
+    return ESP_OK;
+  }
+
+  // Dashboard telemetry is server-push only.  Consume small client messages so
+  // a browser ping/text frame cannot wedge the session; close oversized input.
+  httpd_ws_frame_t frame = {};
+  esp_err_t err = httpd_ws_recv_frame(req, &frame, 0);
+  if (err != ESP_OK || frame.len > 256)
+    return ESP_FAIL;
+  if (frame.len) {
+    uint8_t discard[256];
+    frame.payload = discard;
+    err = httpd_ws_recv_frame(req, &frame, sizeof(discard));
+  }
+  return err;
+}
+
+static void httpsWsSendWork(void *arg) {
+  HttpsWsSnapshot *snapshot = static_cast<HttpsWsSnapshot *>(arg);
+  uint8_t wsCount = 0;
+  if (g_https && snapshot) {
+    int fds[HTTPS_MAX_OPEN_SOCKETS] = {};
+    size_t fdCount = HTTPS_MAX_OPEN_SOCKETS;
+    if (httpd_get_client_list(g_https, &fdCount, fds) == ESP_OK) {
+      httpd_ws_frame_t frame = {};
+      frame.type = HTTPD_WS_TYPE_BINARY;
+      frame.payload = snapshot->data;
+      frame.len = snapshot->len;
+      for (size_t i = 0; i < fdCount; ++i) {
+        if (httpd_ws_get_fd_info(g_https, fds[i]) !=
+            HTTPD_WS_CLIENT_WEBSOCKET)
+          continue;
+        ++wsCount;
+        httpsTouchWsSession(fds[i]);
+        if (httpd_ws_send_frame_async(g_https, fds[i], &frame) != ESP_OK)
+          httpsNoteWsDrop();
+      }
+    }
+  }
+  taskENTER_CRITICAL(&g_httpsWsMux);
+  g_httpsWsClients = wsCount;
+  g_httpsWsTxPending = false;
+  taskEXIT_CRITICAL(&g_httpsWsMux);
+  free(snapshot);
+}
+
+static void queueHttpsWsBatch(const uint8_t *data, size_t dataLen) {
+  if (!httpsWsHasClients() || !data || dataLen == 0 ||
+      dataLen > HTTPS_WS_SNAPSHOT_MAX)
+    return;
+  if (ESP.getFreeHeap() < 48 * 1024) {
+    httpsNoteWsDrop();
+    return;
+  }
+
+  HttpsWsSnapshot *snapshot =
+      static_cast<HttpsWsSnapshot *>(malloc(sizeof(HttpsWsSnapshot)));
+  if (!snapshot) {
+    httpsNoteWsDrop();
+    return;
+  }
+  snapshot->len = dataLen;
+  memcpy(snapshot->data, data, dataLen);
+
+  bool queueIt = false;
+  taskENTER_CRITICAL(&g_httpsWsMux);
+  if (!g_httpsWsTxPending) {
+    g_httpsWsTxPending = true;
+    queueIt = true;
+  }
+  taskEXIT_CRITICAL(&g_httpsWsMux);
+  if (!queueIt) {
+    free(snapshot); // coalesce rather than retaining an ever-growing backlog
+    httpsNoteWsDrop();
+    return;
+  }
+
+  if (httpd_queue_work(g_https, httpsWsSendWork, snapshot) != ESP_OK) {
+    taskENTER_CRITICAL(&g_httpsWsMux);
+    g_httpsWsTxPending = false;
+    taskEXIT_CRITICAL(&g_httpsWsMux);
+    free(snapshot);
+    httpsNoteWsDrop();
+  }
+}
+
+// Below this the rig is one TLS handshake away from an allocation failure, and
+// a Guru Meditation was seen at comparable pressure earlier in this debug.
+static constexpr size_t HTTPS_PROXY_MIN_INTERNAL_HEAP = 32 * 1024;
+
+static esp_err_t httpsProxyHandler(httpd_req_t *req) {
+  httpsLogRequest(req, req->uri);
+  // Serving /api/model streams the whole trained network (~140 KB) up from SD
+  // through the legacy server, and internal heap was measured falling to about
+  // 22 KiB while it ran. Refuse it while memory is that tight rather than take
+  // the rig down: the dashboard treats a failed model read as "not available"
+  // and falls back to its own cached copy.
+  if (heap_caps_get_free_size(MALLOC_CAP_INTERNAL) < HTTPS_PROXY_MIN_INTERNAL_HEAP) {
+    Serial.printf("[HTTPS] %s refused: internal heap %lu below floor\n", req->uri,
+                  (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+    return httpsReply(req, "503 Service Unavailable",
+                      "{\"error\":\"rig memory low, retry shortly\"}");
+  }
+  const char *method = nullptr;
+  if (req->method == IDF_HTTP_GET)
+    method = "GET";
+  else if (req->method == IDF_HTTP_POST)
+    method = "POST";
+  else if (req->method == IDF_HTTP_DELETE)
+    method = "DELETE";
+  else
+    return httpsReply(req, "405 Method Not Allowed",
+                      "{\"error\":\"HTTPS proxy supports GET, POST, DELETE\"}");
+
+  if (req->content_len > HTTPS_PROXY_MAX_REQUEST_BYTES)
+    return httpsReply(req, "413 Payload Too Large",
+                      "{\"error\":\"HTTPS proxy request limit is 2 MiB\"}");
+  if (httpd_req_get_hdr_value_len(req, "Transfer-Encoding") != 0)
+    return httpsReply(req, "400 Bad Request",
+                      "{\"error\":\"chunked request bodies are unsupported\"}");
+
+  char uri[HTTPS_PROXY_URI_MAX] = {};
+  if (!httpsBuildProxyUri(req, uri, sizeof(uri)))
+    return httpsReply(req, "400 Bad Request", "{\"error\":\"invalid API URI\"}");
+  char contentType[160] = {};
+  if (!httpsGetRequestHeader(req, "Content-Type", contentType,
+                             sizeof(contentType)))
+    return httpsReply(req, "431 Request Header Fields Too Large",
+                      "{\"error\":\"unsupported Content-Type header\"}");
+
+  WiFiClient upstream;
+  if (!httpsConnectLegacy(upstream))
+    return httpsReply(req, "502 Bad Gateway",
+                      "{\"error\":\"legacy HTTP server unavailable\"}");
+  upstream.setTimeout(2);
+  const uint32_t deadlineMs = millis() + HTTPS_PROXY_TIMEOUT_MS;
+
+  char *requestHead = g_httpsProxyScratch.requestHead;
+  const int requestHeadLen = snprintf(
+      requestHead, HTTPS_PROXY_HEADER_MAX,
+      "%s %s HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n"
+      "Content-Length: %lu\r\n%s%s\r\n",
+      method, uri, (unsigned long)req->content_len,
+      contentType[0] ? "Content-Type: " : "", contentType[0] ? contentType : "");
+  if (requestHeadLen <= 0 || (size_t)requestHeadLen >= HTTPS_PROXY_HEADER_MAX ||
+      !httpsClientWriteAll(upstream,
+                           reinterpret_cast<const uint8_t *>(requestHead),
+                           (size_t)requestHeadLen, deadlineMs) ||
+      !httpsSendRequestBody(req, upstream, deadlineMs)) {
+    upstream.stop();
+    return httpsReply(req, "504 Gateway Timeout",
+                      "{\"error\":\"legacy HTTP request timed out\"}");
+  }
+
+  char line[512] = {};
+  if (!httpsReadUpstreamLine(upstream, line, sizeof(line), deadlineMs)) {
+    upstream.stop();
+    return httpsReply(req, "502 Bad Gateway",
+                      "{\"error\":\"invalid legacy HTTP response\"}");
+  }
+  const char *statusStart = strchr(line, ' ');
+  if (!statusStart || strncmp(line, "HTTP/1.", 7) != 0 ||
+      statusStart[1] < '0' || statusStart[1] > '9' ||
+      statusStart[2] < '0' || statusStart[2] > '9' ||
+      statusStart[3] < '0' || statusStart[3] > '9' ||
+      (statusStart[4] && statusStart[4] != ' ') ||
+      !httpsHeaderValueSafe(statusStart + 1)) {
+    upstream.stop();
+    return httpsReply(req, "502 Bad Gateway",
+                      "{\"error\":\"unsupported legacy status line\"}");
+  }
+  const uint16_t statusCode = (uint16_t)((statusStart[1] - '0') * 100 +
+                                         (statusStart[2] - '0') * 10 +
+                                         (statusStart[3] - '0'));
+  char status[96] = {};
+  if (!httpsCopyHeaderValue(status, sizeof(status), statusStart + 1)) {
+    upstream.stop();
+    return httpsReply(req, "502 Bad Gateway",
+                      "{\"error\":\"legacy status is too long\"}");
+  }
+
+  bool sawContentLength = false;
+  bool sawTransferEncoding = false;
+  uint32_t responseLength = 0;
+  size_t headerBytes = 0;
+  char responseType[160] = "application/octet-stream";
+  char contentEncoding[96] = {};
+  char contentDisposition[192] = {};
+  char cacheControl[160] = {};
+  char etag[128] = {};
+  char lastModified[96] = {};
+  for (;;) {
+    if (!httpsReadUpstreamLine(upstream, line, sizeof(line), deadlineMs)) {
+      upstream.stop();
+      return httpsReply(req, "502 Bad Gateway",
+                        "{\"error\":\"truncated legacy response headers\"}");
+    }
+    headerBytes += strlen(line) + 2;
+    if (headerBytes > HTTPS_PROXY_HEADER_MAX) {
+      upstream.stop();
+      return httpsReply(req, "502 Bad Gateway",
+                        "{\"error\":\"legacy response headers too large\"}");
+    }
+    if (!line[0])
+      break;
+    char *colon = strchr(line, ':');
+    if (!colon) {
+      upstream.stop();
+      return httpsReply(req, "502 Bad Gateway",
+                        "{\"error\":\"malformed legacy response header\"}");
+    }
+    *colon = 0;
+    char *value = httpsTrimHeaderValue(colon + 1);
+    if (!httpsHeaderValueSafe(value)) {
+      upstream.stop();
+      return httpsReply(req, "502 Bad Gateway",
+                        "{\"error\":\"unsafe legacy response header\"}");
+    }
+    if (httpsHeaderNameIs(line, "Content-Length")) {
+      uint32_t parsedLength = 0;
+      if (!httpsParseContentLength(value, &parsedLength) ||
+          (sawContentLength && parsedLength != responseLength)) {
+        upstream.stop();
+        return httpsReply(req, "502 Bad Gateway",
+                          "{\"error\":\"invalid legacy Content-Length\"}");
+      }
+      responseLength = parsedLength;
+      sawContentLength = true;
+    } else if (httpsHeaderNameIs(line, "Transfer-Encoding")) {
+      sawTransferEncoding = true;
+    } else if (httpsHeaderNameIs(line, "Content-Type")) {
+      if (!httpsCopyHeaderValue(responseType, sizeof(responseType), value))
+        sawTransferEncoding = true; // force a clean error before bytes are sent
+    } else if (httpsHeaderNameIs(line, "Content-Encoding")) {
+      if (!httpsCopyHeaderValue(contentEncoding, sizeof(contentEncoding), value))
+        sawTransferEncoding = true;
+    } else if (httpsHeaderNameIs(line, "Content-Disposition")) {
+      if (!httpsCopyHeaderValue(contentDisposition, sizeof(contentDisposition),
+                                value))
+        sawTransferEncoding = true;
+    } else if (httpsHeaderNameIs(line, "Cache-Control")) {
+      if (!httpsCopyHeaderValue(cacheControl, sizeof(cacheControl), value))
+        sawTransferEncoding = true;
+    } else if (httpsHeaderNameIs(line, "ETag")) {
+      if (!httpsCopyHeaderValue(etag, sizeof(etag), value))
+        sawTransferEncoding = true;
+    } else if (httpsHeaderNameIs(line, "Last-Modified")) {
+      if (!httpsCopyHeaderValue(lastModified, sizeof(lastModified), value))
+        sawTransferEncoding = true;
+    }
+  }
+
+  const bool noBodyStatus = (statusCode >= 100 && statusCode < 200) ||
+                            statusCode == 204 || statusCode == 304;
+  if (sawTransferEncoding || (!sawContentLength && !noBodyStatus) ||
+      responseLength > HTTPS_PROXY_MAX_RESPONSE_BYTES) {
+    upstream.stop();
+    return httpsReply(req, "502 Bad Gateway",
+                      "{\"error\":\"legacy response needs fixed Content-Length and is limited to 8 MiB\"}");
+  }
+  if (noBodyStatus)
+    responseLength = 0;
+
+  // Use raw httpd_send() only after the full upstream header has been validated.
+  // It lets the HTTPS response retain the legacy Content-Length while the body
+  // streams in bounded chunks, rather than silently converting it to chunked.
+  char *responseHead = g_httpsProxyScratch.responseHead;
+  size_t responseHeadLen = 0;
+  bool headersOk =
+      httpsAppend(responseHead, HTTPS_PROXY_HEADER_MAX, &responseHeadLen,
+                  "HTTP/1.1 ") &&
+      httpsAppend(responseHead, HTTPS_PROXY_HEADER_MAX, &responseHeadLen, status) &&
+      httpsAppend(responseHead, HTTPS_PROXY_HEADER_MAX, &responseHeadLen, "\r\n") &&
+      httpsAppend(responseHead, HTTPS_PROXY_HEADER_MAX, &responseHeadLen,
+                  "Content-Type: ") &&
+      httpsAppend(responseHead, HTTPS_PROXY_HEADER_MAX, &responseHeadLen,
+                  responseType);
+  char contentLengthLine[40] = {};
+  snprintf(contentLengthLine, sizeof(contentLengthLine), "\r\nContent-Length: %lu\r\n",
+           (unsigned long)responseLength);
+  headersOk = headersOk &&
+              httpsAppend(responseHead, HTTPS_PROXY_HEADER_MAX, &responseHeadLen,
+                          contentLengthLine) &&
+              httpsAppendForwardedHeader(responseHead, HTTPS_PROXY_HEADER_MAX,
+                                          &responseHeadLen, "Content-Encoding",
+                                          contentEncoding) &&
+              httpsAppendForwardedHeader(responseHead, HTTPS_PROXY_HEADER_MAX,
+                                          &responseHeadLen, "Content-Disposition",
+                                          contentDisposition) &&
+              httpsAppendForwardedHeader(responseHead, HTTPS_PROXY_HEADER_MAX,
+                                          &responseHeadLen, "Cache-Control",
+                                          cacheControl) &&
+              httpsAppendForwardedHeader(responseHead, HTTPS_PROXY_HEADER_MAX,
+                                          &responseHeadLen, "ETag", etag) &&
+              httpsAppendForwardedHeader(responseHead, HTTPS_PROXY_HEADER_MAX,
+                                          &responseHeadLen, "Last-Modified",
+                                          lastModified) &&
+              httpsAppend(responseHead, HTTPS_PROXY_HEADER_MAX, &responseHeadLen,
+                          "Connection: close\r\nX-Content-Type-Options: nosniff\r\n"
+                          "X-StrikeSense-Secure-Mode: https-wss-loopback-proxy\r\n\r\n");
+  if (!headersOk ||
+      !httpsRawSendAll(req, reinterpret_cast<const uint8_t *>(responseHead),
+                       responseHeadLen)) {
+    upstream.stop();
+    return ESP_FAIL;
+  }
+  const bool bodyOk =
+      httpsSendUpstreamBody(req, upstream, responseLength, deadlineMs);
+  upstream.stop();
+  httpsCloseAfterResponse(req);
+  return bodyOk ? ESP_OK : ESP_FAIL; // close rather than fabricate a partial body
+}
+
+static uint8_t *httpsLoadPemFromSd(const char *path, size_t *pemLen) {
+  if (pemLen)
+    *pemLen = 0;
+  if (!SdLogger::isReady())
+    return nullptr;
+  File pem = SD.open(path, FILE_READ);
+  if (!pem || pem.isDirectory()) {
+    if (pem)
+      pem.close();
+    return nullptr;
+  }
+  const size_t bytes = pem.size();
+  if (bytes == 0 || bytes > HTTPS_PEM_MAX_BYTES) {
+    pem.close();
+    return nullptr;
+  }
+  uint8_t *contents = static_cast<uint8_t *>(malloc(bytes + 1));
+  if (!contents) {
+    pem.close();
+    return nullptr;
+  }
+  size_t offset = 0;
+  while (offset < bytes) {
+    const size_t got = pem.read(contents + offset, bytes - offset);
+    if (got == 0)
+      break;
+    offset += got;
+  }
+  pem.close();
+  if (offset != bytes) {
+    free(contents);
+    return nullptr;
+  }
+  contents[bytes] = 0; // PEM parser accepts the terminating NUL in the length
+  if (pemLen)
+    *pemLen = bytes + 1;
+  return contents;
+}
+
+// The hostname file is deliberately a narrow, non-secret setting.  Validate it
+// before using it in a Location header: an SD card must never be able to inject
+// header syntax or redirect a connected phone to an arbitrary URL.
+static bool httpsIsDnsHostname(const String &host) {
+  const size_t length = host.length();
+  if (length == 0 || length > 253 || host.endsWith("."))
+    return false;
+
+  size_t labelLength = 0;
+  for (size_t i = 0; i < length; ++i) {
+    const char c = host[i];
+    if (c == '.') {
+      if (labelLength == 0 || labelLength > 63 || host[i - 1] == '-')
+        return false;
+      labelLength = 0;
+      continue;
+    }
+    const bool alpha = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
+    const bool digit = c >= '0' && c <= '9';
+    if (!(alpha || digit || c == '-') || labelLength == 0 && c == '-')
+      return false;
+    ++labelLength;
+  }
+  return labelLength > 0 && labelLength <= 63 && host[length - 1] != '-';
+}
+
+static bool httpsLoadCanonicalHost() {
+  g_httpsCanonicalHost = HTTPS_DEFAULT_HOST;
+  if (!SdLogger::isReady() || !SD.exists(HTTPS_HOST_PATH))
+    return true; // Local-CA/IP deployment stays compatible without this file.
+
+  File file = SD.open(HTTPS_HOST_PATH, FILE_READ);
+  if (!file || file.isDirectory()) {
+    if (file)
+      file.close();
+    return false;
+  }
+  const size_t bytes = file.size();
+  if (bytes == 0 || bytes > 255) {
+    file.close();
+    return false;
+  }
+  String host;
+  host.reserve(bytes);
+  while (file.available())
+    host += static_cast<char>(file.read());
+  file.close();
+  host.trim(); // Permit the conventional final newline, but nothing internal.
+  if (!httpsIsDnsHostname(host))
+    return false;
+  host.toLowerCase();
+  g_httpsCanonicalHost = host;
+  return true;
+}
+
+static String httpsCanonicalUrl() {
+  return String("https://") + g_httpsCanonicalHost + "/";
+}
+
+static bool httpsRegisterRoute(const char *uri, httpd_method_t method,
+                               esp_err_t (*handler)(httpd_req_t *),
+                               bool websocket = false) {
+  httpd_uri_t route = {};
+  route.uri = uri;
+  route.method = method;
+  route.handler = handler;
+  route.is_websocket = websocket;
+  const esp_err_t err = httpd_register_uri_handler(g_https, &route);
+  if (err != ESP_OK) {
+    Serial.printf("[HTTPS] route %s failed: 0x%lx\n", uri,
+                  (unsigned long)err);
+    return false;
+  }
+  return true;
+}
+
+// The precompiled Arduino IDF is built with CONFIG_LOG_MAXIMUM_LEVEL=1, so
+// every ESP_LOGW/ESP_LOGI inside esp_http_server is compiled out and cannot be
+// restored with esp_log_level_set(). A request the server rejects before it
+// reaches a URI handler — a 404, a header that does not fit, an unsupported
+// method — therefore leaves no trace at all. These handlers put that trace
+// back, which is the only way to tell "the WebSocket upgrade was refused" apart
+// from "the phone never sent one".
+static esp_err_t httpsErrorHandler(httpd_req_t *req, httpd_err_code_t error) {
+  Serial.printf("[HTTPS] rejected code=%d uri=%s tls=%u/%u iheap=%lu\n",
+                (int)error, req && req->uri ? req->uri : "?",
+                (unsigned)httpsSessionCount(),
+                (unsigned)HTTPS_MAX_OPEN_SOCKETS,
+                (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+  httpd_resp_send_err(req, error, nullptr);
+  return ESP_FAIL; // same as the stock handler: the socket is done
+}
+
+static void httpsRegisterErrorLogging() {
+  static const httpd_err_code_t CODES[] = {
+      HTTPD_500_INTERNAL_SERVER_ERROR, HTTPD_501_METHOD_NOT_IMPLEMENTED,
+      HTTPD_505_VERSION_NOT_SUPPORTED, HTTPD_400_BAD_REQUEST,
+      HTTPD_404_NOT_FOUND,             HTTPD_405_METHOD_NOT_ALLOWED,
+      HTTPD_408_REQ_TIMEOUT,           HTTPD_414_URI_TOO_LONG,
+      HTTPD_431_REQ_HDR_FIELDS_TOO_LARGE,
+  };
+  for (httpd_err_code_t code : CODES)
+    httpd_register_err_handler(g_https, code, httpsErrorHandler);
+}
+
+static bool httpsRegisterRoutes() {
+  return httpsRegisterRoute("/", IDF_HTTP_GET, httpsDashboardHandler) &&
+         httpsRegisterRoute("/index.html", IDF_HTTP_GET, httpsDashboardHandler) &&
+         // Same document, a URL no phone has ever cached.
+         //
+         // `/` was served for a day with `Cache-Control: public, max-age=86400`
+         // by an earlier build, so a phone that loaded it then keeps running
+         // that JavaScript without asking the rig anything — no server-side
+         // header can reach a cache entry the browser never revalidates. A
+         // different path is a different cache key, so this one always comes
+         // from the rig. Once loaded, checkFreshness() handles later flashes.
+         httpsRegisterRoute("/new", IDF_HTTP_GET, httpsDashboardHandler) &&
+         httpsRegisterRoute("/mocap/*", IDF_HTTP_GET, httpsMocapAssetHandler) &&
+         httpsRegisterRoute("/api/secure-status", IDF_HTTP_GET,
+                            httpsSecureStatusHandler) &&
+         httpsRegisterRoute("/api/*", (httpd_method_t)HTTP_ANY,
+                            httpsProxyHandler) &&
+         httpsRegisterRoute(WS_PATH, IDF_HTTP_GET, httpsWsHandler, true);
+}
+
+static bool beginHttps() {
+  if (!SdLogger::isReady()) {
+    Serial.println("[HTTPS] disabled: SD is unavailable (TLS PEM files are on SD)");
+    return false;
+  }
+  if (!httpsLoadCanonicalHost()) {
+    Serial.printf("[HTTPS] disabled: %s must contain one valid DNS hostname\n",
+                  HTTPS_HOST_PATH);
+    return false;
+  }
+
+  size_t certLen = 0;
+  size_t keyLen = 0;
+  uint8_t *cert = httpsLoadPemFromSd(HTTPS_CERT_PATH, &certLen);
+  uint8_t *key = httpsLoadPemFromSd(HTTPS_KEY_PATH, &keyLen);
+  if (!cert || !key) {
+    free(cert);
+    free(key);
+    Serial.printf("[HTTPS] disabled: add PEM cert %s and key %s on SD\n",
+                  HTTPS_CERT_PATH, HTTPS_KEY_PATH);
+    return false;
+  }
+
+  httpd_ssl_config_t config = HTTPD_SSL_CONFIG_DEFAULT();
+  config.httpd.max_open_sockets = HTTPS_MAX_OPEN_SOCKETS;
+  config.httpd.max_uri_handlers = HTTPS_MAX_URI_HANDLERS;
+  config.httpd.max_resp_headers = 8;
+  config.httpd.stack_size = 12288;
+  config.httpd.recv_wait_timeout = 2;
+  config.httpd.send_wait_timeout = 2;
+  // A full pool must never be able to lock the live stream out permanently.
+  //
+  // With eviction off, two REST sessions that outlived their responses held
+  // both slots for as long as the phone stayed on the page (`tls=2/2 ws=0` in
+  // [STATS]) and no WebSocket handshake could ever land.  Eviction is back on,
+  // and the stream is protected instead by httpsTouchWsSession(): every pushed
+  // IMU batch marks that socket as the most recently used, so the victim is
+  // always a REST session.
+  config.httpd.lru_purge_enable = true;
+  config.httpd.uri_match_fn = httpd_uri_match_wildcard;
+  // Wrong-SNI/background probes must not hold one of the two TLS slots for the
+  // 10-second ESP-IDF default handshake timeout.
+  config.tls_handshake_timeout_ms = 4000;
+  config.port_secure = HTTPS_PORT;
+  config.servercert = cert;
+  config.servercert_len = certLen;
+  config.prvtkey_pem = key;
+  config.prvtkey_len = keyLen;
+
+  const esp_err_t startErr = httpd_ssl_start(&g_https, &config);
+  // esp_https_server copies both PEM buffers into its TLS context during start.
+  // Keeping the key in a global buffer would only prolong its lifetime in RAM.
+  free(cert);
+  free(key);
+  if (startErr != ESP_OK || !g_https) {
+    g_https = nullptr;
+    Serial.printf("[HTTPS] disabled: TLS server start failed (0x%lx)\n",
+                  (unsigned long)startErr);
+    return false;
+  }
+  httpsRegisterErrorLogging();
+  if (!httpsRegisterRoutes()) {
+    httpd_ssl_stop(g_https);
+    g_https = nullptr;
+    Serial.println("[HTTPS] disabled: native route registration failed");
+    return false;
+  }
+
+  Serial.printf("[HTTPS] Listening on %s (cert SAN must match)\n",
+                httpsCanonicalUrl().c_str());
+  return true;
+}
+
 static void macToStr(const uint8_t *m, char *buf, size_t n) {
   snprintf(buf, n, "%02X:%02X:%02X:%02X:%02X:%02X", m[0], m[1], m[2], m[3],
            m[4], m[5]);
@@ -1389,6 +2523,14 @@ static void modelsMigrateLegacy() {
 static void registerRoutes() {
   // ---- Embedded dashboard (gzip-compressed → fast first paint on mobile) ----
   auto sendDashboard = [](AsyncWebServerRequest *req) {
+    // Once a trusted TLS listener is provisioned, keep an old bookmark or a
+    // captive-portal browser from silently loading the camera-ineligible HTTP
+    // dashboard. The HTTP API remains as the bounded HTTPS proxy's loopback
+    // backend; this redirect only controls the human entry page.
+    if (g_https) {
+      req->redirect(httpsCanonicalUrl());
+      return;
+    }
     // A page load has to win against the live stream, or it never lands.
     //
     // On a browser refresh the OLD page is still alive while this request is
@@ -1427,7 +2569,12 @@ static void registerRoutes() {
     AsyncWebServerResponse *resp = req->beginResponse_P(
         200, "text/html", DASHBOARD_HTML_GZ, DASHBOARD_HTML_GZ_LEN);
     resp->addHeader("Content-Encoding", "gzip");
-    resp->addHeader("Cache-Control", "public, max-age=86400");
+    // Never let the phone reuse a stale dashboard across a firmware flash. The old
+    // "max-age=86400" cached the whole single-file UI for a day, so after an update
+    // the browser kept serving the OLD dashboard — the reported "flashed but the UI
+    // is broken / buttons do nothing." The document is a tiny gzip blob on a local
+    // AP; re-validating every load is cheap and always correct.
+    resp->addHeader("Cache-Control", "no-cache, no-store, must-revalidate");
     // Don't let the browser reuse a keep-alive socket for this: the polling
     // connections have been sitting idle behind a saturated radio and a
     // half-stuck one turns into a page load that never completes. A fresh
@@ -1457,10 +2604,15 @@ static void registerRoutes() {
     doc["psram"] = ESP.getFreePsram();
     doc["rx"] = EspNowRx::packetsReceived();
     doc["dropped"] = EspNowRx::packetsDropped();
-    doc["wsClients"] = g_ws.count();
-    doc["wsDropped"] = g_wsDropped;
+    doc["wsClients"] = g_ws.count() + httpsWsClientCount();
+    doc["wsDropped"] = g_wsDropped + httpsWsDroppedCount();
     doc["quietDrops"] = g_quietDrops; // batches yielded to a page load
     doc["logSeq"] = DiagLog::lastSeq();
+    JsonObject secure = doc["secure"].to<JsonObject>();
+    secure["https"] = g_https != nullptr;
+    secure["wssClients"] = httpsWsClientCount();
+    secure["apiProxy"] =
+        "loopback GET/POST/DELETE; fixed Content-Length; response max 8 MiB";
     // false = this rig has never been through the setup wizard (fresh, or
     // just factory-reset). Any phone that connects opens the wizard itself.
     doc["setupDone"] = Session::setupDone();
@@ -2010,7 +3162,8 @@ static void registerRoutes() {
   // seconds — background traffic that jittered the live stream — and some phones
   // parked the network as "no internet" (the original slow/never load). Success
   // stops the re-checks and makes routing reliable. Trade-off: no auto popup —
-  // open http://192.168.4.1 in a browser (DNS + onNotFound still redirect URLs).
+  // open the canonical URL in a browser (HTTPS once TLS is provisioned; HTTP
+  // otherwise). DNS + onNotFound still redirect arbitrary HTTP URLs.
   auto appleSuccess = [](AsyncWebServerRequest *req) {
     req->send(
         200, "text/html",
@@ -2031,16 +3184,21 @@ static void registerRoutes() {
   });
 
   // Any other unknown host/path (a domain typed in the browser, resolved to us
-  // by the DNS catch-all) → the dashboard, so typing any http URL still works.
+  // by the DNS catch-all) → the canonical dashboard URL. HTTP itself cannot
+  // redirect an arbitrary HTTPS hostname, but it can prevent an accidental
+  // downgrade after TLS has been provisioned.
   g_http.onNotFound([](AsyncWebServerRequest *req) {
-    req->redirect("http://192.168.4.1/");
+    if (g_https)
+      req->redirect(httpsCanonicalUrl());
+    else
+      req->redirect("http://192.168.4.1/");
   });
 }
 
 bool begin() {
   // ใช้ WIFI_AP_STA เพื่อแก้บั๊กรับ ESP-NOW Broadcast ไม่เข้าในบางบอร์ด (ESP32-S3/C3)
   WiFi.mode(WIFI_AP_STA);
-  WiFi.softAP(AP_SSID, AP_PASSWORD, AP_CHANNEL);
+  WiFi.softAP(AP_SSID, AP_PASSWORD, AP_CHANNEL, 0, AP_MAX_CLIENTS);
   WiFi.setSleep(false); // ปิด power save → รับ ESP-NOW ได้ต่อเนื่อง ไม่หลุดเป็นช่วงๆ
   IPAddress ip = WiFi.softAPIP();
   Serial.printf("[WIFI] AP '%s' up at %s (channel %d)\n", AP_SSID,
@@ -2064,11 +3222,6 @@ bool begin() {
          (unsigned)WiFi.softAPgetStationNum());
   }, ARDUINO_EVENT_WIFI_AP_STADISCONNECTED);
 
-  // captive portal: จับ DNS ทุกโดเมน → AP IP · มือถือเช็กเน็ตจะโดน redirect เด้ง dashboard
-  g_dns.setErrorReplyCode(DNSReplyCode::NoError);
-  g_dns.start(53, "*", ip);
-  Serial.println("[DNS] captive portal เปิด (ทุกโดเมน → dashboard)");
-
   g_ws.onEvent(onWsEvent);
   // NO handshake gate here — deliberately.
   //
@@ -2085,6 +3238,25 @@ bool begin() {
   modelsMigrateLegacy(); // fold any pre-library /model.json into /models
   g_http.begin();
   Serial.println("[HTTP] Listening on :80");
+  // Failure here is deliberately non-fatal: the established HTTP dashboard
+  // remains available until the rig is provisioned with its SD PEM pair.
+  const bool secureReady = beginHttps();
+
+  // Once a public certificate is installed, answer DNS for its canonical name
+  // only.  A wildcard captive portal routes iOS/Android probes and third-party
+  // hosts (for example fonts.googleapis.com) to this TLS listener; their SNI
+  // cannot match pokoman.online and the failed handshakes exhaust TLS RAM.
+  // The HTTP-only fallback retains the traditional captive-portal wildcard.
+  if (secureReady) {
+    g_dns.setErrorReplyCode(DNSReplyCode::NonExistentDomain);
+    g_dns.start(53, g_httpsCanonicalHost, ip);
+    Serial.printf("[DNS] secure route %s → %s (others NXDOMAIN)\n",
+                  g_httpsCanonicalHost.c_str(), ip.toString().c_str());
+  } else {
+    g_dns.setErrorReplyCode(DNSReplyCode::NoError);
+    g_dns.start(53, "*", ip);
+    Serial.println("[DNS] captive portal เปิด (ทุกโดเมน → dashboard)");
+  }
   return true;
 }
 
@@ -2166,11 +3338,16 @@ static void flushImuBatch() {
       g_allDiscardSinceMs = 0; // somebody took it — nothing is wedged
     }
   }
+  // Native esp_https_server has no AsyncWebSocket::binaryAll().  Copy one
+  // bounded snapshot into its work queue so all WSS clients see the exact same
+  // wire-format batch while a slow TLS client can only cost bounded drops.
+  if (httpsWsHasClients())
+    queueHttpsWsBatch(g_batch, g_batchLen);
   g_batchLen = 0;
 }
 
 void broadcastImuFrame(const ImuFrame &f) {
-  if (g_ws.count() == 0 || streamIsQuiet()) {
+  if ((g_ws.count() == 0 && !httpsWsHasClients()) || streamIsQuiet()) {
     g_batchLen = 0;
     return;
   }
@@ -2235,8 +3412,10 @@ void loop() {
     ESP.restart();
   }
 }
-size_t connectedClients() { return g_ws.count(); }
-uint32_t wsDropped() { return g_wsDropped; }
+size_t connectedClients() { return g_ws.count() + httpsWsClientCount(); }
+size_t secureSessions() { return httpsSessionCount(); }
+size_t secureSessionLimit() { return HTTPS_MAX_OPEN_SOCKETS; }
+uint32_t wsDropped() { return g_wsDropped + httpsWsDroppedCount(); }
 uint32_t quietDrops() { return g_quietDrops; }
 } // namespace WebServerApp
 
@@ -2259,16 +3438,21 @@ static void logStats() {
     return;
   g_lastStatsLogMs = now;
   Serial.printf(
-      "[STATS] rx=%lu drop=%lu wsdrop=%lu nodes=%u wifi=%u ws=%u sess=%s sd=%s "
-      "rows=%lu heap=%lu\n",
+      "[STATS] rx=%lu drop=%lu wsdrop=%lu nodes=%u wifi=%u ws=%u tls=%u/%u "
+      "sess=%s sd=%s rows=%lu heap=%lu iheap=%lu\n",
       (unsigned long)EspNowRx::packetsReceived(),
       (unsigned long)EspNowRx::packetsDropped(),
       (unsigned long)WebServerApp::wsDropped(),
       (unsigned)Session::liveNodeCount(3000),
       (unsigned)WiFi.softAPgetStationNum(),
       (unsigned)WebServerApp::connectedClients(),
+      (unsigned)WebServerApp::secureSessions(),
+      (unsigned)WebServerApp::secureSessionLimit(),
       Session::isActive() ? "ON" : "off", SdLogger::isReady() ? "OK" : "ERR",
-      (unsigned long)SdLogger::rowsWritten(), (unsigned long)ESP.getFreeHeap());
+      (unsigned long)SdLogger::rowsWritten(), (unsigned long)ESP.getFreeHeap(),
+      // TLS handshakes are paid for out of internal DRAM only; the PSRAM in the
+      // plain heap figure above cannot be used for them.
+      (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
 }
 
 void setup() {
