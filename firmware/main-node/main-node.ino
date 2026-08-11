@@ -967,33 +967,63 @@ uint64_t cardSizeMB() {
 }
 uint64_t usedMB() { return g_ready ? SD.usedBytes() / (1024ULL * 1024ULL) : 0; }
 
-bool begin() {
-  g_spi.begin(SD_SCK_PIN, SD_MISO_PIN, SD_MOSI_PIN, SD_CS_PIN);
-  bool mounted = false;
-  for (int attempt = 1; attempt <= 3; ++attempt) {
-    if (SD.begin(SD_CS_PIN, g_spi, 4000000)) {
-      mounted = true;
-      break;
+// SPI clocks to try, slowest first.
+//
+// The card is initialised at the clock it is later run at, and the SD SPI
+// specification asks for no more than 400 kHz until the card has answered. A
+// fixed 4 MHz mounted this rig's card most of the time and then failed three
+// times in a row on one boot — three identical attempts at the one speed the
+// card would not take, and the session went unrecorded. It mounts at 400 kHz.
+static const uint32_t MOUNT_CLOCKS_HZ[] = {400000, 1000000, 4000000};
+
+static bool tryMount() {
+  for (uint32_t hz : MOUNT_CLOCKS_HZ) {
+    if (SD.begin(SD_CS_PIN, g_spi, hz)) {
+      if (SD.cardType() == CARD_NONE) { // bus answered, but the slot is empty
+        SD.end();
+        continue;
+      }
+      Serial.printf("[SD] OK at %lu kHz, %llu MB used of %llu MB\n",
+                    (unsigned long)(hz / 1000),
+                    (unsigned long long)(SD.usedBytes() / (1024ULL * 1024ULL)),
+                    (unsigned long long)(SD.cardSize() / (1024ULL * 1024ULL)));
+      return true;
     }
-    DLOG("SD", "mount ครั้งที่ %d ไม่สำเร็จ — รอลอง...", attempt);
     SD.end();
-    delay(500);
+    delay(150);
   }
-  if (!mounted) {
-    DLOG("SD", "mount ไม่สำเร็จหลังลอง 3 ครั้ง");
-    g_ready = false;
+  return false;
+}
+
+/** Mount attempt for a rig that is already running. Safe to call repeatedly. */
+bool retryMount() {
+  if (g_ready)
+    return true;
+  if (!tryMount())
     return false;
-  }
-  if (SD.cardType() == CARD_NONE) {
-    DLOG("SD", "ไม่พบการ์ด");
-    g_ready = false;
-    return false;
-  }
   ensureDir("/sessions");
   g_ready = true;
-  Serial.printf("[SD] OK, %llu MB used of %llu MB\n",
-                (unsigned long long)usedMB(), (unsigned long long)cardSizeMB());
   return true;
+}
+
+bool begin() {
+  g_spi.begin(SD_SCK_PIN, SD_MISO_PIN, SD_MOSI_PIN, SD_CS_PIN);
+  // Give the card its power-up settling time. Boot reaches this within a few
+  // hundred milliseconds of the rail coming up, which is inside the window
+  // where a card may still be ignoring the bus.
+  delay(250);
+  for (int attempt = 1; attempt <= 3; ++attempt) {
+    if (tryMount()) {
+      ensureDir("/sessions");
+      g_ready = true;
+      return true;
+    }
+    DLOG("SD", "mount ครั้งที่ %d ไม่สำเร็จ — รอลอง...", attempt);
+    delay(500);
+  }
+  DLOG("SD", "mount ไม่สำเร็จหลังลอง 3 ครั้ง — จะลองใหม่เป็นระยะระหว่างทำงาน");
+  g_ready = false;
+  return false;
 }
 
 bool isReady() { return g_ready; }
@@ -2325,7 +2355,22 @@ void setup() {
   Serial.println("=== Ready ===\n");
 }
 
+// A card that would not mount at boot used to stay dead until someone power
+// cycled the rig, so one flaky mount cost the coach a whole training session
+// with no way to recover short of a reboot. Keep trying, quietly.
+static void retrySdMount() {
+  static uint32_t lastTryMs = 0;
+  const uint32_t now = millis();
+  if (SdLogger::isReady() || now - lastTryMs < 5000)
+    return;
+  lastTryMs = now;
+  if (SdLogger::retryMount())
+    Serial.println("[SD] การ์ดกลับมาแล้ว — บันทึกเซสชันได้ตามปกติ");
+}
+
 void loop() {
+  retrySdMount();
+
   ImuFrame frame;
   int drained = 0;
 
