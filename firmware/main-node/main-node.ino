@@ -1339,6 +1339,25 @@ static uint32_t g_allDiscardSinceMs = 0;
 static constexpr uint32_t DOWNLOAD_QUIET_MS = 5000;
 static volatile bool g_downloadActive = false;
 
+// The exact files the MediaPipe pose runtime asks for, version-pinned. Anything
+// not on this list is a 404 — the same card carries session recordings and, on
+// the secure build, the TLS private key.
+static const char *const MOCAP_ASSETS[] = {
+    "/mocap/mediapipe/0.10.35/wasm/vision_wasm_internal.js",
+    "/mocap/mediapipe/0.10.35/wasm/vision_wasm_internal.wasm",
+    "/mocap/mediapipe/0.10.35/wasm/vision_wasm_nosimd_internal.js",
+    "/mocap/mediapipe/0.10.35/wasm/vision_wasm_nosimd_internal.wasm",
+    "/mocap/mediapipe/0.10.35/models/pose_landmarker_lite.task",
+};
+
+static const char *mocapContentType(const char *path) {
+  if (strstr(path, ".js"))
+    return "text/javascript; charset=utf-8";
+  if (strstr(path, ".wasm"))
+    return "application/wasm";
+  return "application/octet-stream"; // MediaPipe .task
+}
+
 static volatile uint32_t g_pageStartMs = 0;
 static volatile bool g_pagePending = false;
 static uint32_t g_pageOk = 0;
@@ -1786,6 +1805,55 @@ static void registerRoutes() {
     serializeJson(arr, out);
     req->send(200, "application/json", out);
   });
+
+  // ---- GET /mocap/… (MediaPipe assets for on-device pose capture) ----
+  //
+  // The camera needs a secure context, which this HTTP build cannot provide on
+  // its own — but Android Chrome can be told to treat the rig's origin as one
+  // (chrome://flags, "Insecure origins treated as secure"), and then the only
+  // thing still missing is the runtime itself. MediaPipe is several megabytes
+  // and must not come from a CDN: the rig has no route to the internet while it
+  // is being used, which is the whole point of it being a private access point.
+  //
+  // Registered as five exact paths rather than a prefix. The card also holds
+  // recordings and, on the secure build, the TLS private key, so "serve
+  // whatever is under /mocap" is not a surface worth opening for the sake of a
+  // shorter route table.
+  // Say at boot whether the camera can work at all. Without this, a missing
+  // card layout shows up much later as a pose runtime that fails to start, with
+  // the phone reporting a fetch error and the rig reporting nothing.
+  {
+    size_t present = 0;
+    for (const char *asset : MOCAP_ASSETS)
+      if (SdLogger::isReady() && SD.exists(asset))
+        ++present;
+    const size_t total = sizeof(MOCAP_ASSETS) / sizeof(MOCAP_ASSETS[0]);
+    if (present == total)
+      Serial.printf("[MOCAP] ไฟล์ MediaPipe ครบ %u/%u — กล้องพร้อมใช้\n",
+                    (unsigned)present, (unsigned)total);
+    else
+      Serial.printf("[MOCAP] ⚠ ไฟล์ MediaPipe %u/%u บน SD — กล้องจะเริ่มไม่ได้\n",
+                    (unsigned)present, (unsigned)total);
+  }
+
+  for (const char *asset : MOCAP_ASSETS) {
+    g_http.on(asset, HTTP_GET, [](AsyncWebServerRequest *req) {
+      const String path = req->url();
+      if (!SdLogger::isReady() || !SD.exists(path)) {
+        req->send(404, "application/json", "{\"error\":\"mocap asset missing\"}");
+        return;
+      }
+      // Multi-megabyte transfers over the same radio the nodes broadcast on.
+      // Stand the live pipeline down exactly as a session download does; the
+      // coach is setting the camera up, not training, and the files are
+      // version-pinned so this happens once per phone.
+      g_streamQuietUntilMs = millis() + DOWNLOAD_QUIET_MS;
+      AsyncWebServerResponse *resp =
+          req->beginResponse(SD, path, mocapContentType(path.c_str()), false);
+      resp->addHeader("Cache-Control", "public, max-age=31536000, immutable");
+      req->send(resp);
+    });
+  }
 
   // ---- GET /api/session/download?id=… (CSV, also feeds the replay view) ----
   g_http.on("/api/session/download", HTTP_GET, [](AsyncWebServerRequest *req) {
