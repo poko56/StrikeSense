@@ -123,22 +123,45 @@ npm run build        # vite build → gen dashboard_ui.h อัตโนมั�
 
 ---
 
-## 4. Workflow: เทรน AI → อัปโมเดลเข้าเฟิร์มแวร์
+## 4. การอัปโหลดเฟิร์มแวร์ Strike Node (ESP32-C3 SuperMini)
 
+Strike Node คือโหนดเซนเซอร์ติดข้อมือ/หน้าแข้ง (ESP32-C3 + BMI160 IMU):
+
+### Board Settings (ESP32-C3):
+- **Board**: `ESP32C3 Dev Module`
+- **Flash Size**: `4MB`
+- **USB CDC On Boot**: `Disabled` (หรือ Enabled ตามชนิด SuperMini)
+- **Upload Speed**: `921600`
+
+### การ Compile & Flash ด้วย `arduino-cli`:
 ```bash
-# 1) เก็บข้อมูลจาก dashboard → ได้ไฟล์ strike_*.csv หลายไฟล์ (ใส่ใน ml_pipeline/data/)
-# 2) เทรน + export โมเดล
-cd ml_pipeline
-pip install -r requirements.txt
-python train_model.py --data "./data/*.csv"      # ได้ strike_model.h + confusion_matrix.png
-# 3) ก๊อป strike_model.h เข้า firmware แล้ว flash
-cp strike_model.h ../firmware/main-node/
-# 4) compile + upload ตามข้อ 2.3
+FQBN_C3="esp32:esp32:esp32c3"
+PORT_C3="/dev/cu.usbmodem201"
+
+cd firmware
+"$CLI" compile --fqbn "$FQBN_C3" strike-node
+"$CLI" upload -p "$PORT_C3" --fqbn "$FQBN_C3" strike-node
 ```
 
 ---
 
-## 5. Troubleshooting
+## 5. Workflow: เทรน AI → อัปโหลดโมเดลเข้าใช้งาน
+
+```bash
+# 1) เก็บข้อมูลจาก dashboard → ได้ไฟล์ strike_*.csv หลายไฟล์ใน ~/Downloads/
+# 2) เทรน + export โมเดลเป็น TensorFlow.js JSON
+./ml_pipeline/retrain.sh     # ได้ไฟล์ ml_pipeline/strike_web_model_fine.json
+```
+
+**การอัปโหลดเข้าใช้งาน (ไม่ต้อง re-flash ESP32):**
+1. เปิด Web Dashboard ที่ **`https://192.168.4.1`**
+2. ไปที่แท็บ **ระบบ** → **คลังโมเดล AI**
+3. กด **"เพิ่มไฟล์โมเดล"** → เลือกไฟล์ `strike_web_model_fine.json`
+4. โมเดลจะถูกบันทึกใน SD Card ของ Main Node (`/models/`) และนำมาใช้วิเคราะห์ท่าในเบราว์เซอร์ทันที
+
+---
+
+## 6. Troubleshooting
 
 | อาการ | สาเหตุ / วิธีแก้ |
 |---|---|
@@ -151,7 +174,7 @@ cp strike_model.h ../firmware/main-node/
 
 ---
 
-## 6. เชื่อมต่อใช้งานหลัง flash
+## 7. เชื่อมต่อใช้งานหลัง flash
 1. เชื่อม Wi-Fi: **SSID `StrikeSense` · รหัส `muaythai123`**
 2. หลัง provision certificate ตาม [motion-capture-https](motion-capture-https.md)
    ให้เปิดเบราว์เซอร์ → **https://192.168.4.1** สำหรับ Local CA หรือ

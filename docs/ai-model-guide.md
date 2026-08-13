@@ -13,24 +13,28 @@
 Data Logger (dashboard)  ──►  strike_*.csv
       │  เก็บ raw IMU 400Hz + ป้ายท่า
       ▼
-ml_pipeline/train_model.py  ──►  strike_web_model.json   (โมเดลสำหรับเบราว์เซอร์)
-      │                     └─►  strike_model.h          (ทางเลือก: ฝังบน ESP32)
+ml_pipeline/train_model.py  ──►  strike_web_model_fine.json   (โมเดลสำหรับเบราว์เซอร์)
+      │                     └─►  strike_model_fine.h          (ทางเลือก: ฝังบน C++)
       ▼
-แดชบอร์ด → ช่อง "AI MODEL · ตรวจจับท่า" → อัปโหลด .json → เปิดใช้งาน
+แดชบอร์ด → แท็บระบบ → "คลังโมเดล AI" → อัปโหลด .json → บันทึกลง SD Card (/models/)
       ▼
-ทายท่าอัตโนมัติทุกครั้งที่ออกอาวุธ (โชว์ท่า + % ความมั่นใจ)
+ทายท่าอัตโนมัติทุกครั้งที่ออกอาวุธ (โชว์ท่า + % ความมั่นใจ + Strike Score)
 ```
 
 ## 1. เก็บข้อมูล (Data Logger)
 
-1. เปิด Developer mode ในแดชบอร์ด (แท็บ **ระบบ** → เปิด Developer mode หรือกดปุ่ม `d`)
+1. เปิด Developer mode ในแดชบอร์ด (แท็บ **ระบบ** → เปิด โหมดนักพัฒนา)
 2. ที่การ์ด **AI TRAINING · DATA LOGGER** เลือกท่าที่จะบันทึก → กด **เริ่มบันทึก** → ออกอาวุธ → **หยุด**
-3. กด **↓ CSV** เพื่อดาวน์โหลด แล้วนำไฟล์ไปไว้ที่ `ml_pipeline/data/`
-4. ทำซ้ำให้ครบทุกท่า (ยิ่งข้อมูลเยอะ/หลากหลาย ยิ่งแม่น)
+3. กด **↓ ส่งออกทั้งหมด** เพื่อดาวน์โหลด CSV
+4. นำไฟล์ไปวางใน `ml_pipeline/data/` (สคริปต์ `retrain.sh` ย้ายเข้าให้อัตโนมัติ)
 
 ## 2. เทรนโมเดล
 
 ```bash
+# เทรนอัตโนมัติด้วย retrain.sh
+./ml_pipeline/retrain.sh
+
+# หรือรัน train_model.py โดยตรง
 cd ml_pipeline
 pip install -r requirements.txt
 python train_model.py --data "./data/*.csv"
@@ -45,27 +49,27 @@ python train_model.py --data "./data/*.csv"
 | `fine` | ~20 ท่าย่อย | ต้องมี dataset ใหญ่ |
 
 ผลลัพธ์ที่ได้:
-- **`strike_web_model.json`** ← ไฟล์ที่อัปโหลดเข้าแดชบอร์ด (ข้อ 3)
-- `strike_model.h` ← ทางเลือกสำหรับฝังบน ESP32 (TFLite Micro)
+- **`strike_web_model_fine.json`** ← ไฟล์ที่อัปโหลดเข้าแดชบอร์ด (ข้อ 3)
+- `strike_model_fine.h` ← ทางเลือก C++ header สำหรับ embedded C++ reference
 - `confusion_matrix.png` ← ดูว่าโมเดลสับสนท่าไหนบ้าง
 
 > เปลี่ยนขนาดหน้าต่าง/ความลึกโมเดลได้ที่หัวไฟล์ `train_model.py` (`TIME_STEPS`, `build_model`)
-> — ถ้าเปลี่ยน อย่าลืมรัน `python verify_web_model.py` เพื่อยืนยันว่า inference ฝั่งเบราว์เซอร์ยังตรงกับ Keras
+> — รัน `python verify_web_model.py` เพื่อยืนยันว่า inference ฝั่งเบราว์เซอร์ยังตรงกับ Keras
 
-## 3. อัปโหลดเข้าแดชบอร์ด
+## 3. อัปโหลดเข้าแดชบอร์ดและ SD Card
 
-1. เปิดแดชบอร์ด → การ์ด **AI MODEL · ตรวจจับท่า** (คอลัมน์ซ้าย)
-2. กด **⬆ เลือกไฟล์โมเดล** → เลือก `strike_web_model.json`
-3. สถานะจะขึ้น `พร้อม · N ท่า · หน้าต่าง 50×6` และเปิด **"เปิดตรวจจับท่าด้วย AI"** ให้อัตโนมัติ
-4. ออกอาวุธ — ระบบจะโชว์ท่าที่ทายได้ + % ความมั่นใจ + แถบความน่าจะเป็นของแต่ละท่า
-
-โมเดลถูกจำไว้ใน browser (localStorage) จึงยังอยู่หลังรีเฟรช กด **✕ ล้าง** เพื่อเอาออก
+1. เปิดแดชบอร์ด → แท็บ **ระบบ** → หัวข้อ **คลังโมเดล AI**
+2. กด **"เพิ่มไฟล์โมเดล"** → เลือก `strike_web_model_fine.json`
+3. ไฟล์จะถูกสตรีมส่งไปยัง Main Node และบันทึกเก็บใน SD Card (`/models/strike_web_model_fine.json`)
+4. ระบบเปิด **"เปิดตรวจจับท่าด้วย AI"** ให้อัตโนมัติ และโหลดโมเดลเข้าเบราว์เซอร์
+5. เมื่อออกอาวุธ — ระบบจะวิเคราะห์ท่าผ่าน 1D-CNN + Physics engine สดๆ บนหน้าจอ
 
 ## วิธีทำงานภายใน (สรุป)
 
 - IMU ดิบ 400Hz เข้ามาทาง WebSocket → เก็บเป็น ring buffer ต่อโหนด (ค่าดิบ ตรงกับตอนเทรน)
-- เมื่อ detector จับได้ว่ามีการออกอาวุธ → ตัดหน้าต่าง `TIME_STEPS` ตัวอย่างล่าสุด → normalize ด้วย mean/std จากตอนเทรน → รันผ่าน 1D-CNN ในเบราว์เซอร์ (`dashboard/src/ainet.js`)
-- ไม่พึ่ง TensorFlow.js — เอนจินเขียนเอง เล็ก ทำงาน offline ได้ (ยืนยันตรงกับ Keras ระดับ 1e-6 ด้วย `verify_web_model.py`)
+- เมื่อ detector จับได้ว่ามีการออกอาวุธ → ตัดหน้าต่าง `TIME_STEPS` ตัวอย่างล่าสุด → normalize ด้วย mean/std จากตอนเทรน → รันผ่าน 1D-CNN ในเบราว์เซอร์ (`dashboard/src/motioncapture.js`)
+- ทำงานร่วมกับ `physics.js` (Gaussian priors) และ `strikescore.js` (ประเมินคะแนนแรงปะทะ)
+- โมเดลทำงานแบบ offline ได้เต็มรูปแบบ และทดสอบความถูกต้องกับ Keras ระดับ 1e-6 ด้วย `verify_web_model.py`
 
 ## หมายเหตุ: แดชบอร์ดฝังอยู่ในเฟิร์มแวร์
 

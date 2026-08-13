@@ -303,15 +303,15 @@ global_average_pooling1d, flatten, dense, dropout, activation
 
 | ไฟล์ | หน้าที่ |
 |------|--------|
-| `dashboard/src/ainet.js` | forward pass ของ 1D-CNN (ไม่มี dependency) |
-| `dashboard/src/aimodel.js` | โหลด/สลับโมเดล, นโยบายตั้งชื่อ, panel ในหน้าเว็บ |
-| `dashboard/src/detector.js` | detector v2 ตัดหน้าต่าง |
-| `dashboard/src/limbs.js` | mask ท่าตามแขนขา |
-| `dashboard/src/physics.js` | Gaussian prior และการรวมผลใน log space |
-| `dashboard/src/strikescore.js` | คะแนน 0–100 ต่อหมัด |
-| `dashboard/src/logger.js` | Data Logger เก็บ CSV |
-| `ml_pipeline/train_model.py` | pipeline เทรนทั้งหมด |
-| `ml_pipeline/verify_web_model.py` | ยืนยันว่าฝั่งเบราว์เซอร์ตรงกับ Keras |
-| `ml_pipeline/test_detector_parity.py` | ยืนยันว่า detector สองภาษาตัดหน้าต่างเหมือนกัน |
-| `docs/ai-model-guide.md` | คู่มือเชิงเทคนิคของการเทรน/อัปโหลด |
+| `dashboard/src/motioncapture.js` | MediaPipe 3D Pose landmarker + โหลดโมเดล TensorFlow.js AI |
+| `dashboard/src/physics.js` | Gaussian prior และการประมวลผลแรงปะทะ (Live Impact Power) |
+| `strikescore.js` | คะแนนความแม่นยำและแรงปะทะ (0–100 Strike Score) |
+| `dashboard/src/posemath.js` | เรขาคณิต 3D ของข้อต่อและองศาร่างกาย |
+| `dashboard/src/rigclock.js` | ซิงก์เวลาระหว่าง IMU กับกล้องความละเอียดสูง |
+| `dashboard/src/rigorigin.js` | พิกัดอ้างอิงของระบบเซนเซอร์และกล้อง |
+| `dashboard/src/logger.js` | Data Logger บันทึกไฟล์ CSV สำหรับเทรน AI |
+| `ml_pipeline/train_model.py` | Pipeline เทรนโมเดล 1D-CNN ทั้งหมด |
+| `ml_pipeline/verify_web_model.py` | ยืนยันว่าโมเดลเบราว์เซอร์ตรงกับ Keras |
+| `ml_pipeline/test_detector_parity.py` | ยืนยัน Parity การตัดหน้าต่างระหว่าง Python และ JS |
+| `docs/ai-model-guide.md` | คู่มือเชิงเทคนิคของการเทรน/อัปโหลดโมเดล |
 | `docs/เทรนโมเดล.md` | คู่มือขั้นตอนการเทรนโมเดล (Model Training User Manual) |

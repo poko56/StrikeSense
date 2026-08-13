@@ -58,18 +58,37 @@ examples; replace the host and omit `--cacert` when using Let's Encrypt.
 Slot values: `0=Unassigned, 1=LeftHand, 2=RightHand, 3=LeftShin, 4=RightShin`
 
 ### `POST /api/nodes/assign`
+Assign slot (1..4) to a Strike Node MAC address.
 ```json
 { "mac": "AA:BB:CC:DD:EE:01", "slot": 1 }
 ```
 
+### `POST /api/nodes/forget`
+Remove a node mapping from remembered nodes.
+```json
+{ "mac": "AA:BB:CC:DD:EE:01" }
+```
+
+### `POST /api/nodes/identify`
+Send blink command (`PKT_CMD_IDENTIFY`) to a node to locate it physically.
+```json
+{ "mac": "AA:BB:CC:DD:EE:01" }
+```
+
+### `POST /api/nodes/restart`
+Send restart command (`PKT_CMD_RESTART`) to a Strike Node.
+```json
+{ "mac": "AA:BB:CC:DD:EE:01" }
+```
+
+### `POST /api/nodes/link-reset`
+Reset all ESP-NOW node bindings and slot assignments.
+
 ### `POST /api/session/start`
 ```json
-{ "athlete": "demo" }
+{ "athlete": "demo", "drill": "shadow" }
 ```
-→
-```json
-{ "sessionId": "1738291201", "sdLogging": true }
-```
+→ `{ "sessionId": "1738291201", "sdLogging": true }`
 
 ### `POST /api/session/stop`
 → `{ "ok": true }`
@@ -79,13 +98,60 @@ Slot values: `0=Unassigned, 1=LeftHand, 2=RightHand, 3=LeftShin, 4=RightShin`
 [ { "id": "1738291201", "bytes": 1024000, "modTime": 1738291500 } ]
 ```
 
-### `GET /api/sessions/{id}` — download CSV
+### `GET /api/session/download?id={id}` — download CSV
 - Content-Type: `text/csv`
 - Content-Disposition: attachment
-- Body: see CSV format below
 
-### `DELETE /api/sessions/{id}` — remove a session file
-→ `{ "ok": true }`
+### `DELETE /api/session/delete` — remove a session file
+```json
+{ "id": "1738291201" }
+```
+
+### `GET /api/logs?since={N}` — fetch recent system log ring-buffer
+```json
+{
+  "logs": [ { "id": 12, "ts": 4500, "msg": "Node connected: LH" } ],
+  "nextId": 13
+}
+```
+
+### AI Model Management Endpoints
+
+#### `GET /api/model` — get active model JSON
+Returns the active TensorFlow.js model JSON stored on SD card (`/models/strike_web_model_fine.json`).
+
+#### `GET /api/models` — list available model files
+```json
+{
+  "active": "strike_web_model_fine.json",
+  "models": [
+    { "name": "strike_web_model_fine.json", "size": 142000, "active": true }
+  ]
+}
+```
+
+#### `POST /api/models?name={filename}` — upload a new TF.js model JSON
+Uploads model payload to SD card under `/models/{filename}`.
+
+#### `POST /api/models/activate?name={filename}` — set active model
+```json
+{ "ok": true, "active": "strike_web_model_fine.json" }
+```
+
+#### `DELETE /api/models/delete?name={filename}` — delete model file
+```json
+{ "ok": true }
+```
+
+### System Management Endpoints
+
+#### `POST /api/system/radio-restart` — restart ESP-NOW radio driver
+#### `POST /api/system/reboot` — reboot Main Node ESP32-S3
+#### `POST /api/factory-reset` — factory reset settings & data
+```json
+{ "wipeSessions": false, "wipeModel": false }
+```
+#### `POST /api/setup/done` — mark initial setup completed
 
 ---
 

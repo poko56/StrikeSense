@@ -41,33 +41,41 @@
 ```
 firmware/
   shared/         # Protocol header shared between nodes
-  strike-node/    # ESP32-C3 + BMI160 firmware
-  main-node/      # ESP32-S3 hub firmware + bundled dashboard (LittleFS)
-dashboard/        # Web UI source (mirror of firmware/main-node/data)
-tools/simulator/  # Fake Strike Node for testing without hardware
-hardware/         # PCB + Enclosure files
-docs/             # Protocol & API specs
+  strike-node/    # ESP32-C3 + BMI160 IMU firmware (400Hz ESP-NOW)
+  main-node/      # ESP32-S3 hub firmware + embedded PROGMEM dashboard (dashboard_ui.h)
+dashboard/        # Web UI source (Vite + Vanilla JS modular source)
+ml_pipeline/      # 1D-CNN training, TF.js export & parity verification
+tools/            # Cert setup, MediaPipe asset downloader & simulator scripts
+hardware/         # PCB + Enclosure 3D CAD files
+docs/             # Full system documentation & technical specs
 ```
 
-## Status (Sprint S2 — Main Node Skeleton)
+## System Status
 
-| Component | State |
-|-----------|-------|
-| Repo + Protocol | ✅ done |
-| Main Node firmware skeleton | ✅ basic |
-| Dashboard mockup | ✅ basic |
-| Strike Node firmware | ⏳ blocked on BMI160 hardware |
-| SD logger | ⏳ TODO |
-| AI bridge | ⏳ TODO |
-| Custom PCB | ⏳ TODO |
+| Component | State | Description |
+|-----------|-------|-------------|
+| Protocol & Shared Headers | ✅ Done | ESP-NOW 400Hz packet protocol, 4 body slots (protocol.h) |
+| Main Node Firmware | ✅ Done | ESP32-S3 AP, HTTPS/WSS, SD card logger, REST API, PROGMEM Web Server |
+| Strike Node Firmware | ✅ Done | ESP32-C3 + BMI160, I2C 400kHz, battery measurement & deep sleep |
+| Web Dashboard UI | ✅ Done | Real-time 4-slot telemetry, MediaPipe 3D Pose, In-browser TF.js AI |
+| SD Card Data Logger | ✅ Done | CSV session logging, session manager API & web replay |
+| AI Pipeline & Bridge | ✅ Done | 1D-CNN training (`train_model.py`), `retrain.sh`, dynamic SD model storage |
+| Custom PCB / Enclosure | ⏳ Active | Hardware enclosure and PCB layout files |
 
-## Quick Start (Main Node)
+## Quick Start (Build & Flash Firmware)
 
 ```bash
-cd firmware/main-node
-pio run -t upload          # flash firmware
-pio run -t uploadfs        # upload dashboard to LittleFS
-pio device monitor
+# 1. Build Dashboard UI assets into PROGMEM C-header (firmware/main-node/dashboard_ui.h)
+cd dashboard
+npm install
+npm run build
+
+# 2. Compile and flash Main Node firmware using arduino-cli
+cd ../firmware
+CLI="/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli"
+FQBN="esp32:esp32:esp32s3:PSRAM=opi,FlashSize=8M,PartitionScheme=default_8MB,CDCOnBoot=cdc,UploadSpeed=921600"
+"$CLI" compile --fqbn "$FQBN" main-node
+"$CLI" upload -p /dev/cu.usbmodem101 --fqbn "$FQBN" main-node
 ```
 
 เชื่อม Wi‑Fi `StrikeSense` (pwd: `muaythai123`) แล้วเปิด secure origin ตาม

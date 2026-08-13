@@ -99,60 +99,53 @@ ax,ay,az,gx,gy,gz,slot,label
 
 ## 4. เทรนโมเดลบนคอมพิวเตอร์ 🧠
 
+ใช้คำสั่งสคริปต์อัตโนมัติรันคำสั่งเดียว หรือใช้ Python สคริปต์โดยตรง:
+
 ```bash
+# วิธีที่ 1: ใช้ retrain.sh อัตโนมัติ (จะนำเข้า CSV จาก Downloads ให้อัตโนมัติ)
+./ml_pipeline/retrain.sh
+
+# วิธีที่ 2: รันผ่าน Python
 cd ml_pipeline
-
-# ครั้งแรก: ติดตั้ง dependencies (แนะนำ Python 3.10–3.11)
-python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-
-# วางไฟล์ CSV ทั้งหมดใน ./data/ แล้วเทรน
 python train_model.py --data "./data/*.csv"
 ```
 
 **ผลลัพธ์:**
-- `strike_model.h` — โมเดล int8 quantized + metadata (พร้อม flash เข้า ESP32)
-- `confusion_matrix.png` — ดูว่าโมเดลสับสนท่าไหนกับท่าไหน
-- Terminal พิมพ์ **test accuracy** + จำนวน window ต่อคลาส
-
-### ปรับความละเอียดของโมเดล
-แก้ที่หัวไฟล์ `train_model.py`:
-```python
-LABEL_MODE = "coarse"   # 5 อาวุธหลัก (default, เบา+แม่น, รันบน ESP32)
-LABEL_MODE = "fine"     # ~20 ท่าย่อย (ต้องมีข้อมูลเยอะกว่ามาก)
-```
-> เริ่มที่ `coarse` เสมอ ให้แม่นก่อน แล้วค่อยขยับเป็น `fine` เมื่อ dataset โตพอ
+- `strike_web_model_fine.json` — **โมเดล TensorFlow.js สำหรับอัปโหลดเข้า แดชบอร์ด / SD Card**
+- `strike_model_fine.h` — โมเดล C++ header (สำหรับ C++ fallback / embedded reference)
+- `confusion_matrix.png` — ตารางกราฟสรุปว่าโมเดลสับสนท่าไหนกับท่าไหน
+- Terminal พิมพ์ **test accuracy** + ประสิทธิภาพแยกตามท่า
 
 ---
 
-## 5. อัปโมเดลกลับเข้า ESP32 🔁
+## 5. อัปโหลดโมเดลเข้าใช้งาน 🔁
 
-```bash
-# 1) ก๊อปโมเดลเข้า firmware
-cp ml_pipeline/strike_model.h firmware/main-node/
+โมเดล AI ใน StrikeSense ทำงานแบบ **In-Browser TensorFlow.js 1D-CNN** สามารถเปลี่ยนโมเดลใหม่ได้ทันทีโดย **ไม่ต้อง flash เฟิร์มแวร์ ESP32 ใหม่**:
 
-# 2) flash (ดูรายละเอียด + FQBN ใน firmware-upload-guide.md)
-CLI="/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli"
-FQBN="esp32:esp32:esp32s3:PSRAM=opi,FlashSize=8M,PartitionScheme=default_8MB,CDCOnBoot=cdc,UploadSpeed=921600"
-"$CLI" compile --fqbn "$FQBN" firmware/main-node
-"$CLI" upload -p /dev/cu.usbmodem101 --fqbn "$FQBN" firmware/main-node
-```
-
-> การต่อ inference จริง (โหลด `strike_model.h` เข้า TFLite Micro + วน buffer ต่อ slot)
-> เป็น roadmap ขั้นถัดไป — ดูโครงที่แนะนำใน [code-walkthrough §5](code-walkthrough.md)
+### วิธีอัปโหลดผ่าน Web Dashboard:
+1. เชื่อม Wi-Fi **`StrikeSense`** แล้วเปิด **`https://192.168.4.1`**
+2. ไปที่แท็บ **ระบบ** → หัวข้อ **คลังโมเดล AI**
+3. กด **"เพิ่มไฟล์โมเดล"** แล้วเลือกไฟล์ `ml_pipeline/strike_web_model_fine.json`
+4. ระบบจะบันทึกโมเดลลง SD Card ของ Main Node (`/models/`) และโหลดเข้าเบราว์เซอร์อัตโนมัติ
 
 ---
 
 ## 6. Flow สรุปทั้งวงจร
 
 ```
-[เก็บข้อมูล]                [เทรน]                    [ใช้งาน]
-Dashboard Logger  ──CSV──▶  train_model.py  ──.h──▶  flash ESP32  ──▶  โมเดลจำแนกท่า real-time
-เลือกท่า→บันทึก→export      1D-CNN + int8            main-node.ino     (roadmap: inference)
+[เก็บข้อมูล]                [เทรน]                                [ใช้งาน]
+Dashboard Logger  ──CSV──▶  train_model.py / retrain.sh  ──.json──▶  อัปเข้า Web Dashboard / SD Card  ──▶  In-Browser TF.js Real-time AI
+เลือกท่า→บันทึก→export      1D-CNN Model Export                   บันทึกเก็บใน SD (/models/)                วิเคราะห์ท่าและคำนวณคะแนนสด
 ```
 
-## 7. เช็กสถานะเร็วๆ
+---
+
+## 7. เช็กสถานะและ API เร็วๆ
+
 ```bash
-curl --cacert ./strikesense-ca.pem https://192.168.4.1/api/status  # heap, session, sd, ws clients
-curl --cacert ./strikesense-ca.pem https://192.168.4.1/api/nodes   # node ที่ออนไลน์ + battery + rssi
+curl --cacert ./strikesense-ca.pem https://192.168.4.1/api/status   # Heap, session status, SD card, WS clients
+curl --cacert ./strikesense-ca.pem https://192.168.4.1/api/nodes    # โหนดที่ออนไลน์ + slot, battery, RSSI
+curl --cacert ./strikesense-ca.pem https://192.168.4.1/api/models   # รายการโมเดล AI ใน SD card + active model
+curl --cacert ./strikesense-ca.pem https://192.168.4.1/api/logs     # Ring buffer logs ล่าสุด
 ```

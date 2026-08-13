@@ -14,9 +14,9 @@
 | Samples/packet | 8 (= 20 ms window) |
 | Packets/sec/Node | 50 |
 | Payload/Node | ~5.5 KB/s = **44 kbps** |
-| 2 Nodes total | **88 kbps** |
+| 4 Nodes total (Hands + Shins) | **176 kbps** |
 
-→ ESP-NOW practical limit ~250 kbps ในสภาวะดี → **มี headroom พอสมควร**
+→ ESP-NOW practical limit ~250 kbps ในสภาวะดี → **รองรับ 4 โหนดได้อย่างมีเสถียรภาพ**
 
 ## Packet Types
 
@@ -26,7 +26,10 @@
 | `PKT_NODE_HELLO` (0x02) | Strike → Main | 10 B | Announce ตอน boot |
 | `PKT_NODE_STATUS` (0x03) | Strike → Main | 12 B | Battery + uptime ทุก 5s |
 | `PKT_TIME_SYNC` (0x80) | Main → Strike | 8 B | Sync timestamp |
-| `PKT_CMD_CONFIG` (0x81) | Main → Strike | 8 B | Update config |
+| `PKT_CMD_CONFIG` (0x81) | Main → Strike | 8 B | Update sample rate / sensor config |
+| `PKT_CMD_IDENTIFY` (0x82) | Main → Strike | 2 B | กระพริบไฟ LED ระบุตำแหน่งโหนด |
+| `PKT_CMD_CALIBRATE` (0x83) | Main → Strike | 2 B | Calibrate baseline offset |
+| `PKT_CMD_RESTART` (0x84) | Main → Strike | 2 B | สั่งรีบูต Strike Node |
 
 ## IMU Batch Packet Layout (112 bytes)
 

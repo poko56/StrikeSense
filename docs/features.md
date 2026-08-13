@@ -11,12 +11,12 @@
 
 ## ภาพรวม
 
-Dashboard เป็น Single-Page App (Vite · vanilla JS · no framework) ที่:
-1. รับ IMU แบบ binary 400 Hz จาก Strike Nodes ผ่าน WebSocket
-2. ตรวจจับหมัด/เตะแบบ real-time ด้วย heuristic (threshold + refractory)
-3. คำนวณ performance metrics และแสดงผลแบบ visual
-4. คุม session recording, รอบ (round), markers
-5. เรียก REST API ของ Main Node เพื่อ list/download/delete sessions
+Dashboard เป็น Single-Page App (Vite · vanilla JS · PROGMEM embedded) ที่:
+1. รับข้อมูล IMU ความถี่ 400 Hz จาก Strike Nodes ครบทั้ง 4 จุด (มือซ้าย, มือขวา, แข้งซ้าย, แข้งขวา) ผ่าน WebSocket
+2. วิเคราะห์และตรวจจับการออกอาวุธแบบ real-time ด้วย **In-browser TensorFlow.js 1D-CNN AI Model** ร่วมกับ **Gaussian priors physics engine**
+3. รองรับ **MediaPipe Pose 3D Landmarker (Dual Camera mode)** เพื่อจับพิกัดโครงร่างของร่างกายร่วมกับ IMU
+4. คำนวณ performance metrics (Live Impact Power, Velocity Graph, Strike Score 0-100, Stamina Tracker)
+5. ควบคุมการบันทึก session, รอบการซ้อม (Round timer), และจัดการคลังโมเดล AI (`/api/models`) บน SD Card
 
 **Design**: "Fight Card" — ฟอนต์ Bebas Neue + IBM Plex Mono, สี ink/paper + accent แดง Muay Thai, hairline borders, asymmetric 3-rail layout — ไม่ใช่ generic glass-morphism dashboard
 

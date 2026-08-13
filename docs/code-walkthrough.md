@@ -94,12 +94,18 @@ auto sendDashboard = [](AsyncWebServerRequest* req) {
 
 | ไฟล์ | หน้าที่ |
 |---|---|
-| [`main.js`](../dashboard/src/main.js) | Entry — ต่อ state ↔ ws ↔ ui ↔ timer ↔ logger เข้าด้วยกัน |
+| [`main.js`](../dashboard/src/main.js) | Entry — ต่อ state ↔ ws ↔ ui ↔ timer ↔ logger ↔ AI classifier เข้าด้วยกัน |
 | [`ws.js`](../dashboard/src/ws.js) | ถอด binary WebSocket frame → sample objects + reconnect |
 | [`analyzer.js`](../dashboard/src/analyzer.js) | ตรวจจับ "หมัด" จากสัญญาณ (threshold + refractory) |
+| [`motioncapture.js`](../dashboard/src/motioncapture.js) | ประมวลผล MediaPipe Pose Landmarker + โหลดโมเดล TensorFlow.js AI |
+| [`physics.js`](../dashboard/src/physics.js) | คำนวณฟิสิกส์แรงปะทะ (Live Impact Power, Velocity, Kinetic Energy) |
+| [`strikescore.js`](../dashboard/src/strikescore.js) | ประเมินดัชนีคะแนนความแม่นยำและแรงปะทะ (0–100 Strike Score) |
+| [`posemath.js`](../dashboard/src/posemath.js) | เวกเตอร์และฟังก์ชันคำนวณเรขาคณิตของข้อต่อร่างกาย 3D |
+| [`rigclock.js`](../dashboard/src/rigclock.js) | ตัวซิงก์เวลาความละเอียดสูงระหว่าง IMU และกล้อง MediaPipe |
+| [`rigorigin.js`](../dashboard/src/rigorigin.js) | ตัวตั้งพิกัดอ้างอิงของจุดกำเนิดและทิศทางเซนเซอร์ |
 | [`state.js`](../dashboard/src/state.js) | store กลาง + pub/sub (`subscribe`/`scheduleRender`) |
 | [`ui.js`](../dashboard/src/ui.js) | render DOM จาก state |
-| [`timer.js`](../dashboard/src/timer.js) | round timer / stopwatch |
+| [`timer.js`](../dashboard/src/timer.js) | round timer / boxing stopwatch |
 | [`logger.js`](../dashboard/src/logger.js) | **Data Logger** — เก็บ raw IMU + label → CSV |
 
 ### 2.1 `decodeFrame()` — ตรงข้ามกับ `broadcastImuFrame()`
@@ -126,7 +132,7 @@ ingestBatch({ slot, samples, ... }); // ← ป้อน analyzer + state
 
 ## 3. Data Logger — โหมดเก็บข้อมูลฝึก AI (developer mode)
 
-**เป้าหมาย:** เก็บ raw IMU + label ท่า → CSV → เอาไปเทรนบนคอมพิวเตอร์ (ไม่หนัก ESP32)
+**เป้าหมาย:** เก็บ raw IMU + label ท่า → CSV → เอาไปเทรนบนคอมพิวเตอร์
 
 ### 3.1 การ wire 3 จุด
 ```
@@ -144,7 +150,7 @@ index.html: <select id="strikeLabel"> // dropdown ท่าแบบจัดก
 50-52 ถีบ TEEP     (ตรง/ข้าง/กลับหลัง)
 ```
 **กุญแจสำคัญ:** `coarse_class = floor(label/10) - 1` → 0..4 (หมัด/ศอก/เข่า/เตะ/ถีบ)
-ทำให้ logger เก็บ **ละเอียด** แต่โมเดล ESP32 เทรน **หยาบ 5 คลาส** (แม่น + เบา) โดยไม่ต้องแก้ CSV
+ทำให้ logger เก็บ **ละเอียด** แต่โมเดลเทรนได้ทั้งแบบ **หยาบ 5 คลาส** และแบบ **ละเอียด ~20 ท่าย่อย**
 
 ### 3.3 CSV ที่ได้
 ```
@@ -160,42 +166,28 @@ ax,ay,az,gx,gy,gz,slot,label
 ## 4. ML Pipeline — [`ml_pipeline/train_model.py`](../ml_pipeline/train_model.py)
 
 ```
-CSV หลายไฟล์ → load_dataset()  (แปะ file_id กันข้ามไฟล์)
-             → make_windows()  (sliding window ไม่ข้าม file/slot/class)
-             → standardise     (mean/std จาก train เท่านั้น กัน leakage)
-             → build_model()   (1D-CNN: Conv×3 → GAP → Dense)
-             → evaluate        (accuracy + confusion_matrix.png)
-             → export_header() (int8 quantise → strike_model.h)
+CSV หลายไฟล์ → load_dataset()          (แปะ file_id กันข้ามไฟล์)
+             → make_windows()          (sliding window ไม่ข้าม file/slot/class)
+             → standardise             (mean/std จาก train เท่านั้น)
+             → build_model()           (1D-CNN: Conv×3 → GAP → Dense)
+             → evaluate                (accuracy + confusion_matrix.png)
+             → export_tfjs_json()      (strike_web_model_fine.json สำหรับเบราว์เซอร์)
+             → export_header()         (strike_model_fine.h สำหรับ C++ fallback)
 ```
-
-**จุดที่ควรเข้าใจ:**
-- `make_windows()` แบ่ง segment ใหม่ทุกครั้งที่ `(file_id, slot, class)` เปลี่ยน → ทุก window เป็นท่าเดียว/แขนเดียว label ไม่กำกวม
-- `LABEL_MODE = "coarse"` → 5 คลาส (default, รันบน ESP32); เปลี่ยนเป็น `"fine"` เพื่อเทรน ~20 ท่า
-- **int8 quantisation** = จุดที่ทำให้โมเดลเล็ก/เร็วพอสำหรับ TFLite Micro; ต้องมี `representative_dataset`
-- `strike_model.h` แถม metadata: `STRIKE_TIME_STEPS`, `STRIKE_FEAT_MEAN/STD[]`, `STRIKE_CLASS_NAMES[]` ให้เฟิร์มแวร์ preprocess input ให้ตรงกับตอนเทรน
 
 ---
 
-## 5. ขั้นถัดไป: ฝัง Inference บน ESP32 (roadmap)
+## 5. การวิเคราะห์โมเดลแบบ In-Browser TensorFlow.js 🧠
 
-โครงที่แนะนำ (ยังไม่ implement) — ทำเป็น `namespace Inference` ใน main-node:
+ระบบ StrikeSense ใช้สถาปัตยกรรม **In-Browser Machine Learning (1D-CNN + TensorFlow.js)**:
 
-```c
-// buffer วนสะสม sample ต่อ slot จนครบ STRIKE_TIME_STEPS
-// ทำใน loop() หลัง broadcast — ห้าม block WebSocket
-void feed(const ImuFrame& f) {
-    for (sample in f) {
-        ring[slot].push( (sample - MEAN)/STD );     // preprocess ให้ตรงกับตอนเทรน
-        if (ring[slot].full()) {
-            int8_t out[NUM_CLASSES];
-            interpreter.Invoke();                   // ~ms-level บน S3
-            int cls = argmax(out);                  // 0..4 = หมัด/ศอก/เข่า/เตะ/ถีบ
-            // ส่งผลเข้า WS เป็น event ใหม่ (เพิ่ม type ใน frame)
-        }
-    }
-}
-```
-ประเด็นสำคัญ: **run inference นอก ISR, ใน loop()** และใช้ ring buffer ต่อ slot เพื่อไม่ให้ WebSocket สะดุด
+1. **การโหลดโมเดลแบบไดนามิก**:
+   - เมื่อเปิดแดชบอร์ด `motioncapture.js` จะดึงไฟล์โมเดลจาก `/api/model` บน Main Node SD Card (`/models/strike_web_model_fine.json`)
+   - ผู้ใช้สามารถอัปโหลดโมเดลใหม่ผ่าน Web Dashboard ได้ทันทีโดยไม่ต้อง re-flash ESP32
+
+2. **การทำงานของ AI Engine**:
+   - สัญญาณ IMU ความถี่ 400Hz ถูกตัดหน้าต่าง (sliding window 100 samples / 250ms)
+   - โมเดล 1D-CNN ทำงานร่วมกับ **Gaussian priors (`physics.js`)** และ **Strike Score Calculator (`strikescore.js`)** ในการจำแนกประเภทท่าและประเมินพลังหมัด/แข้ง
 
 ---
 
@@ -207,4 +199,4 @@ void feed(const ImuFrame& f) {
 | WebSocket binary frame | `broadcastImuFrame()` | `decodeFrame()` ws.js |
 | IMU scale (2048/16.4) | strike-node config | `ws.js` + `train_model.py` |
 | Label tens-scheme | `index.html` optgroup | `logger.js` + `train_model.py` |
-| Model I/O + normalise | `train_model.py` export | firmware inference (roadmap) |
+| Model JSON Format | `train_model.py` export | `motioncapture.js` + `/api/model` |
