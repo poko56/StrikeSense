@@ -49,41 +49,70 @@
 
 ---
 
-## วิธีที่ 2 — arduino-cli (Terminal) ✅ วิธีที่โปรเจกต์นี้ใช้
+## วิธีที่ 2 — arduino-cli (Terminal / Command Prompt) ✅ วิธีแนะนำ
 
 Arduino IDE 2.x มี `arduino-cli` ฝังอยู่ในตัว ไม่ต้องติดตั้งเพิ่ม:
 
+###  สำหรับ macOS:
 ```bash
-# ตั้ง alias ให้เรียกง่าย (macOS)
 CLI="/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli"
 ```
 
+### ⊞ สำหรับ Windows (Command Prompt / PowerShell):
+```cmd
+set CLI="C:\Program Files\Arduino IDE\resources\app\lib\backend\resources\arduino-cli.exe"
+```
+*(หากติดตั้ง `arduino-cli` ไว้ใน PATH แล้ว สามารถพิมพ์ `arduino-cli` ได้โดยตรง)*
+
+---
+
 ### 2.1 ติดตั้ง core + libraries (ทำครั้งเดียว)
+
+#### macOS:
 ```bash
 "$CLI" core install esp32:esp32
 "$CLI" lib install "Async TCP" "ESP Async WebServer" "ArduinoJson" "Adafruit NeoPixel"
 ```
 
-### 2.2 หาพอร์ตอุปกรณ์
-```bash
-"$CLI" board list
-# มองหาบรรทัดที่เป็น "Serial Port (USB)" เช่น /dev/cu.usbmodem101
+#### Windows:
+```cmd
+%CLI% core install esp32:esp32
+%CLI% lib install "Async TCP" "ESP Async WebServer" "ArduinoJson" "Adafruit NeoPixel"
 ```
 
-### 2.3 Compile + Upload
-FQBN (Fully Qualified Board Name) ที่ encode board settings ข้อ 0.3 ไว้ครบ:
+---
 
+### 2.2 หาพอร์ตอุปกรณ์
+
+```bash
+# macOS / Windows
+"$CLI" board list
+```
+- **macOS**: มองหาพอร์ตที่เป็น `/dev/cu.usbmodem...` หรือ `/dev/cu.usbserial...`
+- **Windows**: มองหาพอร์ตที่เป็น `COM3`, `COM4`, `COM5` เป็นต้น
+
+---
+
+### 2.3 Compile + Upload Main Node (ESP32-S3)
+
+####  สำหรับ macOS:
 ```bash
 FQBN="esp32:esp32:esp32s3:PSRAM=opi,FlashSize=8M,PartitionScheme=default_8MB,CDCOnBoot=cdc,UploadSpeed=921600"
 PORT="/dev/cu.usbmodem101"
 
-cd firmware        # โฟลเดอร์ที่มี main-node/
-
-# compile ก่อน (จับ error ก่อนแตะอุปกรณ์)
+cd firmware
 "$CLI" compile --fqbn "$FQBN" main-node
-
-# upload ลงบอร์ด
 "$CLI" upload -p "$PORT" --fqbn "$FQBN" main-node
+```
+
+#### ⊞ สำหรับ Windows (Command Prompt):
+```cmd
+set FQBN=esp32:esp32:esp32s3:PSRAM=opi,FlashSize=8M,PartitionScheme=default_8MB,CDCOnBoot=cdc,UploadSpeed=921600
+set PORT=COM3
+
+cd firmware
+%CLI% compile --fqbn %FQBN% main-node
+%CLI% upload -p %PORT% --fqbn %FQBN% main-node
 ```
 
 สำเร็จเมื่อเห็น:

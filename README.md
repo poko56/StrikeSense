@@ -64,13 +64,17 @@ docs/             # Full system documentation & technical specs
 
 ## Quick Start (Build & Flash Firmware)
 
+### 1. Build Dashboard UI assets into PROGMEM C-header (`firmware/main-node/dashboard_ui.h`)
 ```bash
-# 1. Build Dashboard UI assets into PROGMEM C-header (firmware/main-node/dashboard_ui.h)
 cd dashboard
 npm install
 npm run build
+```
 
-# 2. Compile and flash Main Node firmware using arduino-cli
+### 2. Compile and flash Main Node firmware
+
+####  สำหรับ macOS:
+```bash
 cd ../firmware
 CLI="/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli"
 FQBN="esp32:esp32:esp32s3:PSRAM=opi,FlashSize=8M,PartitionScheme=default_8MB,CDCOnBoot=cdc,UploadSpeed=921600"
@@ -78,20 +82,27 @@ FQBN="esp32:esp32:esp32s3:PSRAM=opi,FlashSize=8M,PartitionScheme=default_8MB,CDC
 "$CLI" upload -p /dev/cu.usbmodem101 --fqbn "$FQBN" main-node
 ```
 
+#### ⊞ สำหรับ Windows (Command Prompt / PowerShell):
+```cmd
+cd ..\firmware
+set CLI="C:\Program Files\Arduino IDE\resources\app\lib\backend\resources\arduino-cli.exe"
+set FQBN=esp32:esp32:esp32s3:PSRAM=opi,FlashSize=8M,PartitionScheme=default_8MB,CDCOnBoot=cdc,UploadSpeed=921600
+%CLI% compile --fqbn %FQBN% main-node
+%CLI% upload -p COM3 --fqbn %FQBN% main-node
+```
+
 เชื่อม Wi‑Fi `StrikeSense` (pwd: `muaythai123`) แล้วเปิด secure origin ตาม
 [คู่มือ motion capture / HTTPS](docs/motion-capture-https.md):
 `https://192.168.4.1` สำหรับ Local CA หรือ `https://<hostname>` สำหรับ
 Let's Encrypt (ชื่อใน `/tls/hostname.txt`). URL นี้จำเป็นสำหรับกล้องโทรศัพท์และ
-WSS. หาก rig ยังไม่มี certificate ใช้ HTTP ได้เฉพาะ dashboard legacy (ไม่มี
-camera mode และไม่ใช่ transport ที่เข้ารหัส).
+WSS.
 
-## เทรนโมเดลจับท่า
+## เทรนโมเดลจับท่า (AI Model Retraining)
 
-คำสั่งสั้นสำหรับรันเทรนโมเดลใหม่บนคอมพิวเตอร์:
+คำสั่งสำหรับนำเข้า CSV และเทรนโมเดลใหม่บนคอมพิวเตอร์:
 
-```bash
-./ml_pipeline/retrain.sh
-```
+- **macOS / Linux**: `./ml_pipeline/retrain.sh`
+- **Windows**: `.\ml_pipeline\retrain.bat` (หรือดับเบิลคลิกไฟล์ `retrain.bat`)
 
 ---
 
