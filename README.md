@@ -2,6 +2,27 @@
 
 ระบบเซนเซอร์ IoT และวิเคราะห์แรงปะทะสำหรับกีฬามวยไทย แบบ Real-time (IoT Muay Thai Telemetry System)
 
+---
+
+## 📚 ศูนย์รวมเอกสาร (Documentation Index)
+
+| หมวดหมู่ | เอกสาร | คำอธิบาย |
+| :--- | :--- | :--- |
+| **User Manuals** | 🧠 [คู่มือการเทรนโมเดล AI](docs/%E0%B9%80%E0%B8%97%E0%B8%A3%E0%B8%99%E0%B9%82%E0%B8%A1%E0%B9%80%E0%B8%94%E0%B8%A5.md) | ขั้นตอนการเก็บข้อมูล เทรนโมเดล และอัปโหลดเข้าสู่ระบบ |
+| | 📖 [คู่มือการใช้งานระบบ](docs/usage-guide.md) | วิธีการติดตั้ง การเชื่อมต่อ Wi-Fi และการใช้งานแดชบอร์ด |
+| | 🔌 [คู่มือการอัปโหลดเฟิร์มแวร์](docs/firmware-upload-guide.md) | ขั้นตอนการแฟลชเฟิร์มแวร์ลง ESP32-S3 และ ESP32-C3 |
+| | 🔒 [คู่มือ Motion Capture & HTTPS/WSS](docs/motion-capture-https.md) | การตั้งค่า Secure Origin และใบรับรองความปลอดภัย HTTPS |
+| **Technical Specs** | 📡 [Protocol Spec](docs/protocol.md) | โครงสร้างแพ็กเกจข้อมูล ESP-NOW และ WebSocket (400Hz) |
+| | 🔗 [API Spec](docs/api.md) | REST / WebSocket APIs สำหรับรับส่งข้อมูลแดชบอร์ด |
+| | 🤖 [AI Model Technical Guide](docs/ai-model-guide.md) | สถาปัตยกรรม 1D-CNN และระบบคลาสสิฟายท่าทาง |
+| | 💻 [Code Walkthrough](docs/code-walkthrough.md) | อธิบายโครงสร้างซอร์สโค้ด และสถาปัตยกรรมซอฟต์แวร์ |
+| **Reports & Briefs** | ✨ [System Features](docs/features.md) | รายละเอียดคุณสมบัติ และเกณฑ์การวัดผล |
+| | 📊 [AI Presentation Brief](docs/ai-presentation-brief.md) | ข้อมูลสรุปสเปกโครงการสำหรับนำเสนอ |
+| | 🛠️ [HTTPS/WSS Debug Guide](docs/ai-handoff-https-wss-debug.md) | ขั้นตอนและวิธีแก้ไขปัญหาการเชื่อมต่อ |
+| | 📄 [Progress Report (HTML)](docs/progress-report.html) / [(PDF)](docs/StrikeSense-Progress-Report.pdf) | รายงานความก้าวหน้าโครงการ StrikeSense |
+
+---
+
 ## Architecture
 
 ```
@@ -56,16 +77,9 @@ Let's Encrypt (ชื่อใน `/tls/hostname.txt`). URL นี้จำเ�
 WSS. หาก rig ยังไม่มี certificate ใช้ HTTP ได้เฉพาะ dashboard legacy (ไม่มี
 camera mode และไม่ใช่ transport ที่เข้ารหัส).
 
-## Docs
-
-- [Protocol spec](docs/protocol.md)
-- [API spec](docs/api.md)
-- [Motion capture + HTTPS/WSS](docs/motion-capture-https.md)
-
 ## เทรนโมเดลจับท่า
 
-คู่มือขั้นตอนการเก็บข้อมูล เทรนโมเดล และอัปโหลดเข้าสู่ระบบ (User Manual):
-[คู่มือการเทรนโมเดล](docs/%E0%B9%80%E0%B8%97%E0%B8%A3%E0%B8%99%E0%B9%82%E0%B8%A1%E0%B9%80%E0%B8%94%E0%B8%A5.md)
+คำสั่งสั้นสำหรับรันเทรนโมเดลใหม่บนคอมพิวเตอร์:
 
 ```bash
 ./ml_pipeline/retrain.sh
