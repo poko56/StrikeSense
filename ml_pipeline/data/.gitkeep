@@ -1,0 +1,2 @@
+# วางไฟล์ strike_*.csv ที่ export จาก Data Logger ไว้ในโฟลเดอร์นี้
+# แล้วรัน:  python train_model.py --data "./data/*.csv"

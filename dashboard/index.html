@@ -1,0 +1,796 @@
+<!doctype html>
+<html lang="th" data-theme="dark">
+
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>StrikeSense · Fight Console</title>
+  <!-- Build identity, stamped by vite. freshness.js reads this out of the
+       document the rig serves to spot a cached-stale dashboard. -->
+  <meta name="ss-build" content="dev">
+
+  <!-- Keep the rig fully offline.  Its captive DNS intentionally resolves all
+       hostnames to the Main Node; external font requests would therefore hit
+       this TLS listener with a foreign hostname, churn handshakes, and starve
+       the live WSS stream.  CSS uses local system-font fallbacks instead. -->
+
+  <!-- Declared empty on purpose. Without it a phone asks the rig for
+       /favicon.ico while the page is loading, and on HTTPS that costs a whole
+       TLS handshake (~50 KiB of internal heap) out of a two-client budget at
+       the exact moment the WSS stream is trying to claim its socket. -->
+  <link rel="icon" href="data:,">
+
+  <link rel="stylesheet" href="./style.css">
+</head>
+
+<body>
+
+  <!-- ────────── TOPBAR ────────── -->
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark">⛒</span>
+      <span class="brand-name">STRIKESENSE</span>
+      <span class="brand-sub">FIGHT CONSOLE</span>
+    </div>
+
+    <div class="topbar-mid">
+      <span id="recPill" class="pill pill-off"><span class="pill-dot"></span><span id="recPillTxt">STANDBY</span></span>
+      <span class="topbar-meta">
+        <span class="meta-k">ยก</span><span class="meta-v" id="curRound">—</span>
+        <span class="meta-k">ช่วง</span><span class="meta-v" id="curPhase">—</span>
+        <span class="meta-k">เวลา</span><span class="meta-v mono" id="curClock">00:00</span>
+      </span>
+      <span class="live-sensor" id="liveSensor" title="เซนเซอร์สด — อุปกรณ์ยังตอบสนองต่อค่าแรง G">
+        <span class="ls-dot"></span>
+        <span class="meta-k">แรง G</span><span class="meta-v mono" id="liveG">0.0</span>
+      </span>
+    </div>
+
+    <div class="topbar-right">
+      <button class="icon-btn" id="btnTheme" title="สลับธีมสว่าง/มืด (T)">◐</button>
+      <button class="icon-btn" id="btnHeatmap" title="สลับฮีตแมปร่างกาย (H)">▦</button>
+      <button class="icon-btn" id="btnFullscreen" title="เต็มจอ (F)">⛶</button>
+      <button class="icon-btn" id="btnHelp" title="ปุ่มลัด (?)">?</button>
+      <span class="conn" id="conn"><span class="conn-dot"></span><span id="connTxt">กำลังเชื่อมต่อ…</span></span>
+    </div>
+  </header>
+
+  <!-- ────────── MAIN GRID ────────── -->
+  <main class="layout">
+
+    <!-- The live read: what was just thrown and what it scored. First in the DOM
+         so a phone on the rig's own WiFi shows it without scrolling; the desktop
+         grid puts it back at the top of the middle column. -->
+    <div class="block hero-block" id="heroBlock">
+      <div class="hero-main">
+        <div class="hero-lbl">ท่าล่าสุด</div>
+        <div class="hero-tech" id="heroTech">—</div>
+        <div class="hero-sub" id="heroSub"></div>
+        <div class="hero-combo" id="heroCombo" hidden>🔥 คอมโบ <b id="heroComboN">×0</b></div>
+      </div>
+      <div class="hero-score">
+        <div class="hero-lbl">คะแนน</div>
+        <div class="hero-score-val mono"><span id="heroScore">—</span><i>/100</i></div>
+        <div class="hero-score-track"><span id="heroScoreFill"></span></div>
+      </div>
+      <div class="hero-facts">
+        <div class="hero-fact"><span>แรง</span><b class="mono" id="heroG">—</b></div>
+        <div class="hero-fact"><span>ความเร็ว</span><b class="mono" id="heroDps">—</b></div>
+        <div class="hero-fact"><span>อวัยวะ</span><b id="heroSlot">—</b></div>
+        <div class="hero-fact"><span>มุมข้อต่อ</span><b class="mono" id="heroAngle">—</b></div>
+        <div class="hero-fact"><span>ครั้งทั้งหมด</span><b class="mono" id="heroTotal">0</b></div>
+      </div>
+    </div>
+
+
+
+    <!-- ░░░░ LEFT RAIL ░░░░ -->
+    <aside class="rail rail-left">
+
+      <!-- Athlete block -->
+      <section class="block athlete">
+        <div class="kicker">นักมวย</div>
+        <label class="sr-only" for="athleteName">ชื่อนักมวย</label>
+        <input id="athleteName" class="athlete-input" type="text" value="Fighter 1" maxlength="32" list="athleteHistory"
+          autocomplete="off">
+        <datalist id="athleteHistory"></datalist>
+        <div class="athlete-meta">
+          <label class="select-wrap">
+            <span class="kicker tiny">ประเภทซ้อม</span>
+            <select id="drillType">
+              <option value="shadow">ชกลม</option>
+              <option value="pad" selected>เตะแพ็ด</option>
+              <option value="bag">กระสอบ</option>
+              <option value="spar">คู่ซ้อม</option>
+              <option value="free">อิสระ</option>
+            </select>
+          </label>
+          <label class="select-wrap">
+            <span class="kicker tiny">โหมดเวลา</span>
+            <select id="roundPreset">
+              <option value="3x3">3 ยก × 3:00 / 1:00</option>
+              <option value="5x3" selected>5 ยก × 3:00 / 1:00</option>
+              <option value="3x2">3 ยก × 2:00 / 0:30</option>
+              <option value="12x3">12 ยก × 3:00 / 1:00</option>
+              <option value="stopwatch">จับเวลาอิสระ</option>
+              <option value="custom">กำหนดเอง…</option>
+            </select>
+          </label>
+        </div>
+      </section>
+
+      <!-- REC + Round dial -->
+      <section class="block dial-block">
+        <div class="dial-wrap">
+          <svg viewBox="0 0 220 220" class="dial" id="roundDial">
+            <circle cx="110" cy="110" r="98" class="dial-track" />
+            <circle cx="110" cy="110" r="98" class="dial-fill" id="dialFill" pathLength="100" stroke-dasharray="100 100"
+              stroke-dashoffset="100" />
+            <text x="110" y="100" text-anchor="middle" class="dial-clock" id="dialClock">00:00</text>
+            <text x="110" y="135" text-anchor="middle" class="dial-phase" id="dialPhase">READY</text>
+            <text x="110" y="158" text-anchor="middle" class="dial-round" id="dialRound">— / —</text>
+          </svg>
+        </div>
+
+        <!-- The primary action. A full-width, thumb-sized target on its OWN row —
+             it used to be a small pill overlapping the dial, and a finger that
+             landed a few px high hit the dial (which only starts the round clock),
+             so on a phone "บันทึก" seemed dead while a precise mouse click worked. -->
+        <button class="rec-btn" id="btnRec" type="button">
+          <span class="rec-dot"></span><span class="rec-label" id="btnRecLabel">เริ่มบันทึกการซ้อม</span>
+        </button>
+
+        <div class="dial-controls">
+          <button class="tbtn" id="btnRoundReset" type="button">รีเซ็ต</button>
+          <button class="tbtn" id="btnRoundSkip" type="button">ข้าม&nbsp;»</button>
+          <button class="tbtn" id="btnMarker" type="button" title="เพิ่มมาร์กเกอร์ (M)">+ มาร์ก</button>
+          <label class="check"><input type="checkbox" id="autoRec" checked> บันทึกอัตโนมัติ/ยก</label>
+        </div>
+      </section>
+
+      <!-- Session stats -->
+      <section class="block stats-block">
+        <div class="kicker">สรุปการซ้อม</div>
+        <div class="stats-grid">
+          <div class="stat">
+            <div class="stat-lbl">แรงสูงสุด</div>
+            <div class="stat-val mono" id="stPeak"><span class="stat-num">0.0</span><span class="stat-unit">g</span>
+            </div>
+          </div>
+          <div class="stat">
+            <div class="stat-lbl">เฉลี่ย</div>
+            <div class="stat-val mono" id="stAvg"><span class="stat-num">0.0</span><span class="stat-unit">g</span>
+            </div>
+          </div>
+          <div class="stat">
+            <div class="stat-lbl">จำนวนครั้ง</div>
+            <div class="stat-val mono" id="stCount">0</div>
+          </div>
+          <div class="stat">
+            <div class="stat-lbl">ครั้ง/นาที</div>
+            <div class="stat-val mono" id="stSpm">0</div>
+          </div>
+          <div class="stat">
+            <div class="stat-lbl">เวลาออกอาวุธ</div>
+            <div class="stat-val mono" id="stToT">0<span class="stat-unit">%</span></div>
+          </div>
+          <div class="stat">
+            <div class="stat-lbl">พลังงาน</div>
+            <div class="stat-val mono" id="stWork">0.0<span class="stat-unit">kJ</span></div>
+          </div>
+          <div class="stat span2">
+            <div class="stat-lbl">เวลาเซสชัน</div>
+            <div class="stat-val mono big" id="stDuration">00:00:00</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Recent recordings — history reachable straight from the home view, no
+           digging through the คลังข้อมูล tab. Updates the moment a recording stops. -->
+      <section class="block recent-block">
+        <div class="block-head">
+          <div class="kicker">ประวัติการซ้อมล่าสุด</div>
+          <button class="chip ghost" id="btnAllHistory" type="button">ดูทั้งหมด ›</button>
+        </div>
+        <div class="recent-list" id="recentList">
+          <div class="empty-card">— ยังไม่มีการซ้อมที่บันทึกไว้ —</div>
+        </div>
+      </section>
+
+      <!-- Goals -->
+      <section class="block goals-block">
+        <div class="block-head">
+          <div class="kicker">เป้าหมาย</div>
+          <button class="chip ghost" id="btnEditGoals" type="button">แก้ไข</button>
+        </div>
+        <div class="goal-row">
+          <span class="goal-name">จำนวนครั้ง</span>
+          <div class="goal-bar"><span class="goal-fill" id="goalStrFill"></span></div>
+          <span class="goal-text mono" id="goalStrTxt">0 / 100</span>
+        </div>
+        <div class="goal-row">
+          <span class="goal-name">แรง ≥</span>
+          <div class="goal-bar"><span class="goal-fill" id="goalPeakFill"></span></div>
+          <span class="goal-text mono" id="goalPeakTxt">0 / 8 g</span>
+        </div>
+        <div class="goal-status" id="goalStatus">— ตั้งเป้า แล้วทำให้ถึง ทำซ้ำ —</div>
+      </section>
+
+      <!-- Per-round summary -->
+      <section class="block round-summary">
+        <div class="kicker">สรุปรายยก</div>
+        <div class="round-table-wrap">
+          <table class="round-table mono" id="roundTbl">
+            <thead>
+              <tr>
+                <th>ยก</th>
+                <th class="num">ครั้ง</th>
+                <th class="num">สูงสุด</th>
+                <th class="num">เฉลี่ย</th>
+                <th class="num">ล้า</th>
+              </tr>
+            </thead>
+            <tbody id="roundTbody">
+              <tr class="empty">
+                <td colspan="5">— สรุปแต่ละยกจะแสดงที่นี่ —</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- Activity feed -->
+      <section class="block activity-block">
+        <div class="kicker">กิจกรรมล่าสุด</div>
+        <ul class="activity-list" id="activityList">
+          <li class="dim">— ยังไม่มีกิจกรรม —</li>
+        </ul>
+      </section>
+
+      <!-- AI Training · Data Logger (developer mode) -->
+      <section class="block logger-block" data-dev>
+        <div class="kicker">เก็บข้อมูลเทรน AI</div>
+        <p class="logger-hint">
+          เก็บ raw IMU (400Hz) ติดป้ายท่า → export CSV → เทรน 1D-CNN บนคอมพิวเตอร์ → อัปโหลดโมเดล (.json) ในช่อง "AI MODEL" ด้านล่าง
+        </p>
+
+        <label class="select-wrap logger-select-wrap">
+          <span class="kicker tiny">ท่าที่บันทึก · STRIKE LABEL</span>
+          <label class="sr-only" for="strikeLabel">เลือกท่ามวยที่จะบันทึก</label>
+          <select id="strikeLabel">
+            <optgroup label="หมัด · PUNCH">
+              <option value="10">หมัดตรงชกนำ · Jab</option>
+              <option value="11">หมัดตรงหลัง · Cross</option>
+              <option value="12">หมัดฮุก/เหวี่ยง · Hook</option>
+              <option value="13">หมัดอัพเปอร์คัท/สอยดาว · Uppercut</option>
+            </optgroup>
+            <optgroup label="ศอก · ELBOW">
+              <option value="20">ศอกตี (บนลงล่าง) · Chopping</option>
+              <option value="21">ศอกตัด (ขนานพื้น) · Slashing</option>
+              <option value="22">ศอกงัด (ล่างขึ้นบน) · Uppercut</option>
+              <option value="23">ศอกพุ่ง · Thrusting</option>
+              <option value="24">ศอกกระทุ้ง · Spearing</option>
+              <option value="25">ศอกกลับ · Spinning</option>
+            </optgroup>
+            <optgroup label="เข่า · KNEE">
+              <option value="30">เข่าตรง/เข่าโหน · Straight</option>
+              <option value="31">เข่าเฉียง/เข่าตี · Diagonal</option>
+              <option value="32">เข่าตัด · Curving</option>
+              <option value="33">เข่าลอย · Flying</option>
+            </optgroup>
+            <optgroup label="เตะ · KICK">
+              <option value="40">เตะตรง · Straight/Up</option>
+              <option value="41" selected>เตะเฉียง · Roundhouse</option>
+              <option value="42">เตะตัด (ล่าง) · Low</option>
+              <option value="43">เตะกลับ · Spinning-back</option>
+              <option value="44">เตะเหวี่ยงกลับ · Spinning-heel</option>
+            </optgroup>
+            <optgroup label="ถีบ · TEEP">
+              <option value="50">ถีบตรง (สกัด) · Straight</option>
+              <option value="51">ถีบข้าง · Side</option>
+              <option value="52">ถีบกลับหลัง · Back</option>
+            </optgroup>
+          </select>
+        </label>
+
+        <!-- node readiness (ต้องมีโหนดของอวัยวะที่จะเก็บ · แยกซ้าย-ขวา) -->
+        <div class="logger-nodes">
+          <span class="kicker tiny">โหนดที่พร้อม · REQUIRED NODES</span>
+          <div class="node-chips">
+            <span class="node-chip" id="nodeChip-1" data-slot="1">🥊 มือซ้าย</span>
+            <span class="node-chip" id="nodeChip-2" data-slot="2">🥊 มือขวา</span>
+            <span class="node-chip" id="nodeChip-3" data-slot="3">🦵 แข้งซ้าย</span>
+            <span class="node-chip" id="nodeChip-4" data-slot="4">🦵 แข้งขวา</span>
+          </div>
+          <label class="logger-check">
+            <input type="checkbox" id="loggerRequireBoth" checked>
+            <span>ต้องครบซ้าย-ขวา ก่อนบันทึก (ให้ AI แยกข้างได้)</span>
+          </label>
+        </div>
+        <p class="logger-guard-hint" id="loggerGuardHint"></p>
+
+        <div class="logger-actions">
+          <button id="btnRecordToggle" class="logger-btn logger-btn-record" type="button">
+            <span class="rec-dot"></span><span id="btnRecordLabel">เริ่มบันทึก</span>
+          </button>
+          <button id="btnExportCSV" class="logger-btn logger-btn-export" type="button" title="รวมทุกเทคเป็นไฟล์เดียวสำหรับเทรน">↓ ส่งออกทั้งหมด</button>
+        </div>
+
+        <!-- What has been collected so far, and what is still short. Takes stack up
+             here instead of each one becoming a separate download the coach has to
+             keep track of. -->
+        <div class="kicker tiny mt-4">คลังข้อมูลที่เก็บไว้</div>
+        <div class="train-bank" id="trainBank">
+          <div class="dim small">ยังไม่ได้เก็บอะไร — เลือกท่า กดเริ่มบันทึก ออกอาวุธ แล้วกดหยุด</div>
+        </div>
+        <div class="train-how dim small mt-2">
+          <b>เทรนใหม่ 3 ขั้น</b><br>
+          1 · กด “↓ ส่งออกทั้งหมด” (ไฟล์ลง Downloads)<br>
+          2 · บนคอมรัน <span class="mono">./ml_pipeline/retrain.sh</span> — หาไฟล์เอง เทรนเอง<br>
+          3 · อัป <span class="mono">strike_web_model_fine.json</span> ที่ “คลังโมเดล AI” ด้านล่าง<br>
+          <span class="dim">คู่มือเต็ม: <span class="mono">docs/เทรนโมเดล-มือใหม่.md</span></span>
+        </div>
+
+        <div class="logger-readout">
+          <div class="lr-cell"><span class="lr-k">ROWS</span><span class="lr-v mono" id="recordCount">0</span></div>
+          <div class="lr-cell"><span class="lr-k">TIME</span><span class="lr-v mono" id="recordTime">0.0s</span></div>
+          <div class="lr-cell"><span class="lr-k">LIMB</span><span class="lr-v mono" id="recordLimb">—</span></div>
+        </div>
+      </section>
+
+      <!-- AI Model · live gesture detection (in-browser 1D-CNN).
+           Not dev-gated: loading/enabling a model is a coach action, not a
+           developer one — hiding it behind dev mode is why "เรียกใช้ AI ไม่ได้". -->
+      <section class="block ai-block">
+        <div class="kicker">โมเดลจำแนกท่า</div>
+        <p class="ai-hint">
+          อัปโหลดไฟล์ <b>strike_web_model.json</b> ที่ได้จากการเทรน → เปิดใช้งาน แล้วระบบจะทายท่าจากการออกอาวุธแบบเรียลไทม์ (ประมวลผลในเบราว์เซอร์ ไม่ต้องต่อเน็ต)
+        </p>
+
+        <div class="ai-file-row">
+          <label class="ai-upload-btn">
+            <input type="file" id="aiModelFile" accept=".json,application/json" hidden>
+            <span>⬆ เพิ่มไฟล์โมเดล</span>
+          </label>
+          <button id="aiModelClear" class="ai-clear-btn" type="button" title="เลิกใช้โมเดล (ไฟล์ยังอยู่ในคลัง)">✕ เลิกใช้</button>
+        </div>
+
+        <!-- model library: which file is used / not · click a row to select -->
+        <div class="ai-models" id="aiModelList"></div>
+
+        <div class="ai-status" id="aiModelStatus">ยังไม่ได้โหลดโมเดล</div>
+
+        <!-- Which techniques this model was actually trained on. Anything else the
+             athlete throws comes back as the nearest of these, which is a guess by
+             construction — the coach has to be able to tell the two apart. -->
+        <div class="ai-coverage" id="aiCoverage"></div>
+
+        <label class="ai-enable">
+          <input type="checkbox" id="aiEnableToggle">
+          <span>เปิดตรวจจับท่าด้วย AI</span>
+        </label>
+
+        <label class="ai-enable">
+          <input type="checkbox" id="aiAlwaysName">
+          <span>ระบุท่าทุกครั้งที่ตี — ไม่งดตอบเพราะไม่มั่นใจ</span>
+        </label>
+        <div class="ai-hint dim small" id="aiAlwaysNameHint"></div>
+
+        <div class="ai-readout">
+          <div class="ai-big" id="aiLastLabel">—</div>
+          <div class="ai-conf mono" id="aiLastConf"></div>
+        </div>
+
+        <div class="ai-probs" id="aiProbs"></div>
+        <div class="ai-recent" id="aiRecent"></div>
+      </section>
+    </aside>
+
+    <!-- ░░░░ CENTER STAGE ░░░░ -->
+    <section class="stage">
+
+      <!-- TOP: body diagram + mixer + distribution -->
+      <div class="stage-top">
+
+        <div class="block body-block">
+          <div class="block-head">
+            <div class="kicker">จุดที่โดน</div>
+            <span class="seg-toggle">
+              <button class="seg-btn seg-on" data-bmode="live" id="bmLive">สด</button>
+              <button class="seg-btn" data-bmode="heat" id="bmHeat">ฮีตแมป</button>
+            </span>
+          </div>
+          <div class="body-wrap">
+            <svg viewBox="0 0 240 360" class="body" id="bodySvg" aria-hidden="true">
+              <g class="body-silhouette" fill="#1a1a1f" stroke="#2a2a30" stroke-width="1">
+                <circle cx="120" cy="38" r="22" />
+                <rect x="110" y="58" width="20" height="12" />
+                <path d="M78 70 L162 70 L172 130 L168 200 L72 200 L68 130 Z" />
+                <rect x="72" y="198" width="96" height="6" fill="#d62631" opacity=".5" />
+                <path d="M78 78 L52 110 L40 175 L48 220 L62 220 L66 178 L72 132 Z" />
+                <path d="M162 78 L188 110 L200 175 L192 220 L178 220 L174 178 L168 132 Z" />
+                <path d="M84 204 L78 280 L74 350 L98 350 L102 280 L106 204 Z" />
+                <path d="M138 204 L142 280 L146 350 L168 350 L166 280 L156 204 Z" />
+              </g>
+              <g class="hitzones">
+                <g class="zone" data-slot="2" id="zone-2">
+                  <circle cx="44" cy="225" r="22" />
+                  <text x="44" y="229" text-anchor="middle">RH</text>
+                </g>
+                <g class="zone" data-slot="1" id="zone-1">
+                  <circle cx="196" cy="225" r="22" />
+                  <text x="196" y="229" text-anchor="middle">LH</text>
+                </g>
+                <g class="zone" data-slot="4" id="zone-4">
+                  <circle cx="88" cy="320" r="22" />
+                  <text x="88" y="324" text-anchor="middle">RS</text>
+                </g>
+                <g class="zone" data-slot="3" id="zone-3">
+                  <circle cx="152" cy="320" r="22" />
+                  <text x="152" y="324" text-anchor="middle">LS</text>
+                </g>
+              </g>
+            </svg>
+
+            <!-- Live VU mixer with sparklines -->
+            <div class="mixer" id="mixer"></div>
+          </div>
+        </div>
+
+        <!-- Distribution / histogram / asym / fatigue -->
+        <div class="block dist-block">
+          <div class="kicker">นับท่าที่ออก</div>
+          <div class="dist-list" id="distList"></div>
+
+          <div class="kicker tiny mt-4">ช่วงแรงที่ออก</div>
+          <div class="hist" id="histBars">
+            <div class="hist-bar" data-range="1-3"><span class="hist-fill"></span><span
+                class="hist-lbl">1-3g</span><span class="hist-cnt">0</span></div>
+            <div class="hist-bar" data-range="3-5"><span class="hist-fill"></span><span
+                class="hist-lbl">3-5g</span><span class="hist-cnt">0</span></div>
+            <div class="hist-bar" data-range="5-10"><span class="hist-fill"></span><span
+                class="hist-lbl">5-10g</span><span class="hist-cnt">0</span></div>
+            <div class="hist-bar" data-range="10+"><span class="hist-fill"></span><span
+                class="hist-lbl">10+g</span><span class="hist-cnt">0</span></div>
+          </div>
+
+          <div class="kicker tiny mt-4">สมดุลซ้าย-ขวา</div>
+          <div class="asym-bar"><span class="asym-l" id="asymL"></span><span class="asym-r" id="asymR"></span></div>
+          <div class="asym-meta"><span id="asymLtxt">ซ้าย 0</span><span id="asymRtxt">ขวา 0</span></div>
+
+          <div class="kicker tiny mt-4">ความล้า</div>
+          <div class="fatigue-wrap"><span class="fatigue-fill" id="fatigueFill"></span></div>
+          <div class="fatigue-meta"><span id="fatigueTxt">— · คงที่</span></div>
+        </div>
+      </div>
+
+      <!-- Performance scorecard (radar) -->
+      <div class="block scorecard-block">
+        <div class="block-head">
+          <div class="kicker">ประเมินผลรวม</div>
+          <span class="dim small">จุดเด่น/จุดพลาดจากเซนเซอร์ · อัปเดตสด</span>
+        </div>
+        <div class="scorecard-wrap">
+          <div class="radar-col">
+            <svg viewBox="0 0 280 250" class="radar" id="radarSvg" aria-label="แผนภูมิเรดาร์คะแนน"></svg>
+          </div>
+          <div class="score-col">
+            <div class="score-hero">
+              <div class="score-grade g-wait" id="scoreGrade">–</div>
+              <div class="score-hero-meta">
+                <div class="score-overall"><span class="mono" id="scoreOverall">—</span><span class="score-of">/100</span></div>
+                <div class="score-grade-sub" id="scoreGradeSub">รอข้อมูล</div>
+              </div>
+            </div>
+            <div class="score-bars" id="scoreBars"></div>
+            <div class="score-callouts">
+              <div class="sc-callout">
+                <span class="kicker tiny">จุดเด่น</span>
+                <div class="sc-tags" id="scoreStrengths"><span class="sc-tag dim">—</span></div>
+              </div>
+              <div class="sc-callout">
+                <span class="kicker tiny">ควรพัฒนา</span>
+                <div class="sc-tags" id="scoreWeak"><span class="sc-tag dim">—</span></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Session timeline + strike log -->
+      <div class="block strike-log">
+        <div class="block-head">
+          <div class="kicker">ไทม์ไลน์</div>
+          <span class="dim small">แตะที่จุดเพื่อดูรายละเอียด · แตะพื้นที่ว่างเพื่อเพิ่มมาร์กเกอร์</span>
+        </div>
+        <div class="timeline" id="timeline">
+          <div class="tl-track" id="tlTrack"></div>
+          <div class="tl-axis mono" id="tlAxis"></div>
+        </div>
+
+        <div class="block-head mt-4">
+          <div class="kicker">ประวัติการต่อย</div>
+          <div class="chip-row">
+            <button class="chip chip-on" data-filter="all">ทั้งหมด</button>
+            <button class="chip" data-filter="1">มือซ้าย</button>
+            <button class="chip" data-filter="2">มือขวา</button>
+            <button class="chip" data-filter="3">แข้งซ้าย</button>
+            <button class="chip" data-filter="4">แข้งขวา</button>
+            <span class="flex-spacer"></span>
+            <button class="chip ghost" id="btnScoreHelp" type="button" title="คะแนนแต่ละท่าคิดยังไง">ⓘ คะแนน</button>
+            <button class="chip ghost" id="btnClearLog">ล้าง</button>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table class="strike-table">
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>เวลา</th>
+                <th>ยก</th>
+                <th>ตำแหน่ง</th>
+                <th>ท่า</th>
+                <th class="sc-col">คะแนน</th>
+                <th class="num">แรง·g</th>
+                <th class="num">ω·°/s</th>
+                <th class="num">พัก·ms</th>
+              </tr>
+            </thead>
+            <tbody id="strikeTbody">
+              <tr class="empty">
+                <td colspan="9">— ยังไม่มีการออกอาวุธ —</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- ░░░░ RIGHT RAIL ░░░░ -->
+    <aside class="rail rail-right">
+
+      <nav class="tabs">
+        <button class="tab tab-on" data-tab="sensors">เซนเซอร์</button>
+        <button class="tab" data-tab="mocap">กล้อง</button>
+        <button class="tab" data-tab="library">คลังข้อมูล</button>
+        <button class="tab" data-tab="system">ระบบ</button>
+      </nav>
+
+      <!-- SENSORS -->
+      <section class="block tabpane on" data-pane="sensors">
+        <div class="sensors-head">
+          <div class="kicker">เซนเซอร์ที่เชื่อมต่อ</div>
+          <div class="sensors-head-btns">
+            <button class="cal-all-btn" id="btnRescanNodes" title="ค้นหา/รีเฟรชโหนดทั้งหมดทันที">🔄 ค้นหาใหม่</button>
+            <button class="cal-all-btn" id="btnCalAll" title="คาลิเบรตทุกโหนดพร้อมกัน">⊕ คาลิเบรตทั้งหมด</button>
+          </div>
+        </div>
+        <button class="setup-relaunch" id="btnOpenSetup" type="button">🧭 เปิดตัวช่วยตั้งค่าเซนเซอร์ (เขย่าเพื่อจับคู่)</button>
+        <div class="node-list" id="nodeList">
+          <div class="empty-card">— ไม่พบโหนด —<br><span class="dim">เปิด Strike Node ให้อยู่ในระยะ 2 เมตรจากโหนดหลัก</span></div>
+        </div>
+
+        <div class="kicker mt-4">มาร์กเกอร์ · MARKERS</div>
+        <ul class="marker-list" id="markerList">
+          <li class="dim">— ยังไม่มีมาร์กเกอร์ · กด M ระหว่างบันทึก —</li>
+        </ul>
+      </section>
+
+      <!-- MOTION CAPTURE · phone camera and IMU fuse only at a detected impact. -->
+      <section class="block tabpane mocap-pane" data-pane="mocap">
+        <div class="block-head">
+          <div>
+            <div class="kicker">กล้องจับท่าทาง</div>
+            <div class="dim small">Pose ในมือถือ · มุม 3D ผูกกับแรงจาก IMU</div>
+          </div>
+          <span class="mc-status mono" id="mcStatus">OFF</span>
+        </div>
+
+        <p class="mc-hint">
+          จัดให้เห็นตัวเต็ม ตั้งกล้องแนวนอน แล้วกดเริ่ม ระบบคงฝั่งซ้าย/ขวาตามกายวิภาค ไม่กลับตามภาพกล้อง
+        </p>
+        <div class="mc-controls">
+          <label class="select-wrap mc-facing">
+            <span class="kicker tiny">กล้อง</span>
+            <select id="mcFacing">
+              <option value="environment">กล้องหลัง</option>
+              <option value="user">กล้องหน้า</option>
+            </select>
+          </label>
+          <button class="mc-btn mc-start" id="mcStart" type="button">▶ เริ่มจับท่า</button>
+          <button class="mc-btn" id="mcStop" type="button" disabled>■ หยุด</button>
+        </div>
+
+        <div class="mc-stage" id="mcStage">
+          <video id="mcVideo" autoplay muted playsinline></video>
+          <canvas id="mcOverlay" aria-hidden="true"></canvas>
+          <div class="mc-empty" id="mcEmpty">
+            <b>กล้องยังไม่เริ่ม</b>
+            <span>ต้องเปิดหน้านี้ผ่าน HTTPS ที่ trusted ก่อน</span>
+          </div>
+        </div>
+
+        <div class="mc-readout">
+          <div><span>POSE FPS</span><b class="mono" id="mcFps">—</b></div>
+          <div><span>VISIBILITY</span><b class="mono" id="mcQuality">—</b></div>
+          <div class="mc-wide"><span>มุมล่าสุด</span><b class="mono" id="mcLastAngles">—</b></div>
+          <div class="mc-wide"><span>TIME DELTA (EST.)</span><b class="mono" id="mcSync">—</b></div>
+        </div>
+        <p class="mc-note dim small">
+          แรงและชนิดอาวุธยังวัดจาก IMU เท่านั้น กล้องเพิ่มมุมข้อศอก/ไหล่ หรือสะโพก/เข่า/ข้อเท้าของ slot เดียวกัน; Δ เวลาเป็นค่าประมาณจาก rig และวิดีโอ ไม่ใช่การซิงก์ระดับเครื่องมือวิจัย
+        </p>
+      </section>
+
+      <!-- LIBRARY -->
+      <section class="block tabpane" data-pane="library">
+        <div class="block-head">
+          <div class="kicker">การซ้อมที่บันทึกไว้</div>
+          <button class="chip ghost" id="btnRefreshLib" type="button">↻ รีเฟรช</button>
+        </div>
+        <input class="search" id="libSearch" type="search" placeholder="ค้นหาด้วยรหัสเซสชัน…">
+        <div class="lib-stats">
+          <span><span class="meta-k">ทั้งหมด</span> <span class="mono" id="libCount">0</span></span>
+          <span><span class="meta-k">ขนาด</span> <span class="mono" id="libSize">— KB</span></span>
+          <span><span class="meta-k">การ์ด</span> <span class="mono" id="libCard">— / —</span></span>
+        </div>
+        <div class="compare-bar">
+          <span class="meta-k">เลือกไว้</span>
+          <span class="mono" id="cmpCount">0</span>
+          <button class="chip ghost" id="btnCompareOpen" disabled>เปรียบเทียบ</button>
+          <button class="chip ghost" id="btnCompareClear">ล้าง</button>
+        </div>
+        <div class="lib-list" id="libList">
+          <div class="empty-card">— คลังว่าง —</div>
+        </div>
+      </section>
+
+      <!-- SYSTEM -->
+      <section class="block tabpane" data-pane="system">
+        <div class="dev-toggle-row">
+          <div>
+            <div class="kicker">โหมดนักพัฒนา</div>
+            <div class="dim small">แสดงเครื่องมือเก็บข้อมูลเทรน AI (หรือกด <b>D</b> / เปิดด้วย <span class="mono">?dev=1</span>)</div>
+          </div>
+          <label class="switch">
+            <input type="checkbox" id="devModeToggle">
+            <span class="switch-track"><span class="switch-thumb"></span></span>
+          </label>
+        </div>
+        <button class="tour-launch" id="btnStartTour" type="button">🎓 เริ่มทัวร์แนะนำการใช้งาน</button>
+
+        <div data-dev>
+        <div class="kicker mt-4">ข้อมูลเครื่อง</div>
+        <table class="kv-table mono">
+          <tr>
+            <td>IP</td>
+            <td id="sysIp">192.168.4.1</td>
+          </tr>
+          <tr>
+            <td>SSID</td>
+            <td id="sysSsid">StrikeSense</td>
+          </tr>
+          <tr>
+            <td>UPTIME</td>
+            <td id="sysUp">—</td>
+          </tr>
+          <tr>
+            <td>HEAP FREE</td>
+            <td id="sysHeap">—</td>
+          </tr>
+          <tr>
+            <td>PSRAM FREE</td>
+            <td id="sysPsram">—</td>
+          </tr>
+          <tr>
+            <td>WS CLIENTS</td>
+            <td id="sysWs">0</td>
+          </tr>
+        </table>
+
+        <div class="kicker mt-4">ESP-NOW</div>
+        <table class="kv-table mono">
+          <tr>
+            <td>PACKETS RX</td>
+            <td id="sysRx">0</td>
+          </tr>
+          <tr>
+            <td>DROPPED</td>
+            <td id="sysDrop">0</td>
+          </tr>
+          <tr>
+            <td>SAMPLE RATE</td>
+            <td id="sysHz">0 Hz</td>
+          </tr>
+          <tr>
+            <td>BANDWIDTH</td>
+            <td id="sysBw">0 kbps</td>
+          </tr>
+        </table>
+
+        <div class="kicker mt-4">ตั้งค่าการตรวจจับ</div>
+        <label class="row-inline">
+          <span class="meta-k">เกณฑ์แรง</span>
+          <!-- Peak |accel| including gravity, so a limb at rest already reads
+               1.0 g. Below ~4 g an ordinary footfall on a shin node counts as a
+               strike, which is why the floor is no longer 1.5. -->
+          <input type="range" id="thrSlider" min="4" max="16" step="0.1" value="6.0">
+          <span class="mono" id="thrVal">6.0 g</span>
+        </label>
+        <label class="row-inline">
+          <span class="meta-k">หน่วงเวลา</span>
+          <!-- One kick is chamber + impact + foot landing inside ~400 ms. -->
+          <input type="range" id="refrSlider" min="250" max="900" step="10" value="400">
+          <span class="mono" id="refrVal">400 ms</span>
+        </label>
+
+        </div>
+
+        <div class="kicker mt-4">พื้นที่เก็บข้อมูล</div>
+        <div class="bar"><span class="bar-fill" id="sdBarFill"></span></div>
+        <div class="bar-meta mono"><span id="sdUsedTxt">— ใช้ไป</span><span id="sdFreeTxt">— ว่าง</span></div>
+
+        <div class="kicker mt-4" data-dev>เกี่ยวกับ</div>
+        <table class="kv-table mono" data-dev>
+          <tr>
+            <td>BUILD</td>
+            <td id="aboutBuild">—</td>
+          </tr>
+          <tr>
+            <td>UA</td>
+            <td id="aboutUa" class="ellipsis">—</td>
+          </tr>
+          <tr>
+            <td>DASHBOARD</td>
+            <td>StrikeSense v0.2</td>
+          </tr>
+        </table>
+
+        <!-- dev mode only: full diagnostic console (rig + browser events) -->
+        <div class="diag-block" data-dev>
+          <div class="kicker mt-4">บันทึกการทำงานละเอียด</div>
+          <div class="dim small">เหตุการณ์ทั้งหมดจากโหนดหลักและเบราว์เซอร์ — แบต · การเชื่อมต่อ · WebSocket · SD</div>
+          <div class="diag-bar">
+            <input class="search" id="diagFilter" type="search" placeholder="กรอง เช่น WS, BATT, HTTP…">
+            <button class="chip ghost" id="diagPause" type="button">⏸ หยุด</button>
+            <button class="chip ghost" id="diagCopy" type="button">⧉ คัดลอก</button>
+            <button class="chip ghost" id="diagClear" type="button">ล้าง</button>
+          </div>
+          <div class="diag-stat mono dim small" id="diagStat">—</div>
+          <div class="diag-list mono" id="diagList">
+            <div class="dim small">— ยังไม่มี log —</div>
+          </div>
+        </div>
+
+        <div data-dev>
+        <div class="kicker mt-4">กู้คืนการเชื่อมต่อ</div>
+        <div class="dim small">ใช้เมื่อโหนดขึ้นในรายการแต่ไม่มีข้อมูลเข้า หรือหน้าเว็บต่อไม่ติด</div>
+        <div class="recovery-row">
+          <button class="recovery-btn" id="btnReconnectWs" type="button">⇄ ต่อสตรีมใหม่</button>
+          <button class="recovery-btn" id="btnRadioRestart" type="button">📡 รีสตาร์ทวิทยุ</button>
+          <button class="recovery-btn" id="btnMainReboot" type="button">↻ รีบูตโหนดหลัก</button>
+        </div>
+
+        <div class="kicker mt-4">รีเซ็ตอุปกรณ์</div>
+        <div class="dim small">ล้างการจับคู่เซนเซอร์และค่าทั้งหมด แล้วเริ่มตั้งค่าใหม่เหมือนเพิ่งแกะกล่อง</div>
+        <button class="factory-reset-btn" id="btnFactoryReset" type="button">↺ รีเซ็ตเป็นค่าจากโรงงาน</button>
+        </div>
+      </section>
+
+    </aside>
+  </main>
+
+  <footer class="footbar mono">
+    <span>StrikeSense · Build <span id="buildStamp">dev</span></span>
+    <span class="flex-spacer"></span>
+    <span>Channel 1 · ESP-NOW</span>
+    <span>·</span>
+    <span id="modeTxt">LIVE</span>
+  </footer>
+
+  <!-- toast container -->
+  <div class="toast-stack" id="toast"></div>
+
+  <script type="module" src="./src/main.js"></script>
+</body>
+
+</html>
