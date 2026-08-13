@@ -314,4 +314,4 @@ global_average_pooling1d, flatten, dense, dropout, activation
 | `ml_pipeline/verify_web_model.py` | ยืนยันว่าฝั่งเบราว์เซอร์ตรงกับ Keras |
 | `ml_pipeline/test_detector_parity.py` | ยืนยันว่า detector สองภาษาตัดหน้าต่างเหมือนกัน |
 | `docs/ai-model-guide.md` | คู่มือเชิงเทคนิคของการเทรน/อัปโหลด |
-| `docs/เทรนโมเดล-มือใหม่.md` | คู่มือแบบพาทำทีละขั้นสำหรับมือใหม่ |
+| `docs/เทรนโมเดล.md` | คู่มือขั้นตอนการเทรนโมเดล (Model Training User Manual) |
