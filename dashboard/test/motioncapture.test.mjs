@@ -30,13 +30,50 @@ function putAngle(pose, [first, vertex, third], degrees) {
 test('camera access is denied in an insecure context before a permission prompt', () => {
   const insecure = cameraAccessStatus({
     isSecureContext: false,
-    navigator: { mediaDevices: { getUserMedia() {} } },
+    location: { origin: 'http://192.168.4.1' },
+    navigator: { mediaDevices: { getUserMedia() {} }, userAgent: 'Mozilla/5.0 (iPhone) Safari/605' },
   });
-  assert.deepEqual(insecure, {
-    ok: false,
-    code: 'insecure-context',
-    message: 'กล้องต้องเปิดผ่าน HTTPS ที่เชื่อถือได้',
+  assert.equal(insecure.ok, false);
+  assert.equal(insecure.code, 'insecure-context');
+  assert.equal(insecure.androidChrome, false);
+  // iOS has no switch to offer, so it must not be sent after the desktop proxy
+  // or a Chrome flag — both are remedies it cannot use.
+  assert.equal(insecure.iOS, true);
+  assert.match(insecure.message, /HTTPS/);
+  assert.doesNotMatch(insecure.message, /chrome:\/\/flags|localhost-proxy/);
+  // Whatever the device, the message names the origin that was rejected: a
+  // proxy that is not running and a flag that did not take look identical
+  // without it.
+  assert.match(insecure.message, /http:\/\/192\.168\.4\.1/);
+
+  // A desktop browser can reach the rig through a localhost forward, which is a
+  // secure context with no flag and no certificate.
+  const desktop = cameraAccessStatus({
+    isSecureContext: false,
+    location: { origin: 'http://192.168.4.1' },
+    navigator: {
+      mediaDevices: { getUserMedia() {} },
+      userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Chrome/122.0.0.0 Safari/537.36',
+      maxTouchPoints: 0,
+    },
   });
+  assert.equal(desktop.iOS, false);
+  assert.equal(desktop.androidChrome, false);
+  assert.match(desktop.message, /localhost:8080/);
+
+  // Android Chrome can make the rig's own origin a secure context, so it is
+  // told how instead of being told a rule it cannot act on.
+  const android = cameraAccessStatus({
+    isSecureContext: false,
+    location: { origin: 'http://192.168.4.1' },
+    navigator: {
+      mediaDevices: { getUserMedia() {} },
+      userAgent: 'Mozilla/5.0 (Linux; Android 14; Pixel 8) Chrome/122.0.0.0 Mobile Safari/537.36',
+    },
+  });
+  assert.equal(android.androidChrome, true);
+  assert.match(android.message, /chrome:\/\/flags/);
+  assert.match(android.message, /http:\/\/192\.168\.4\.1/);
 
   const unavailable = cameraAccessStatus({ isSecureContext: true, navigator: {} });
   assert.equal(unavailable.ok, false);

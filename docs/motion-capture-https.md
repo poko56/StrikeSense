@@ -4,6 +4,11 @@
 StrikeSense โดยกล้องโทรศัพท์จะประมวลผล MediaPipe ในเบราว์เซอร์และรวมผลกับ
 IMU ผ่าน WebSocket ที่เข้ารหัสแล้ว
 
+> **ทางลัดสำหรับ Android:** ถ้า rig ทำงานบนบิลด์ HTTP (ซึ่งเป็นสถานะปัจจุบัน —
+> งาน HTTPS ถูกพักไว้) ยังใช้กล้องได้โดยไม่ต้องมี certificate เลย ดูหัวข้อ
+> [Android over HTTP](#android-over-http--ใช้กล้องบน-http) ท้ายเอกสาร
+> วิธีนี้ใช้กับ iOS ไม่ได้
+
 ## Canonical address / URL หลัก
 
 1. เชื่อมต่อ Wi-Fi ของ rig ตามปกติ
@@ -215,3 +220,53 @@ finishes.
   Treat recordings and any removable card as sensitive training data.
 
 MediaPipe model source: [Pose Landmarker for web](https://ai.google.dev/edge/mediapipe/solutions/vision/pose_landmarker/web_js).
+
+## Android over HTTP — ใช้กล้องบน HTTP
+
+`getUserMedia()` เปิดให้เฉพาะ secure context เท่านั้น ซึ่งตามปกติแปลว่าต้องเป็น HTTPS
+แต่ **Android Chrome เป็นเบราว์เซอร์เดียวที่ผู้ใช้ยกข้อจำกัดนี้เองได้** โดยประกาศว่า
+origin ของ rig เป็น secure context ซึ่งตรงกับสิ่งที่ `getUserMedia` ต้องการพอดี:
+เครือข่ายส่วนตัวที่ไม่มีเส้นทางออกอินเทอร์เน็ต
+
+iOS ไม่มีสวิตช์เทียบเท่า — ทั้ง Safari และ Chrome/Firefox บน iOS ใช้ WebKit ตัวเดียวกัน
+บน iOS จึงต้องใช้ HTTPS จริงตามเอกสารข้างต้นเท่านั้น
+
+### ขั้นตอน (ทำครั้งเดียวต่อเครื่อง)
+
+1. เชื่อมต่อ Wi-Fi `StrikeSense`
+2. เปิด `chrome://flags`
+3. ค้นหา **Insecure origins treated as secure**
+4. ตั้งเป็น **Enabled** และใส่ origin ของ rig ในช่องข้อความ:
+
+   ```text
+   http://192.168.4.1
+   ```
+
+5. กด **Relaunch**
+6. เปิด `http://192.168.4.1/` แล้วเปิดการ์ดกล้อง → อนุญาตให้ใช้กล้อง
+
+ถ้ายังไม่ได้ตั้ง flag หน้าเว็บจะแสดงขั้นตอนนี้พร้อม origin ที่ต้องคัดลอกให้เอง
+(แสดงเฉพาะเมื่อตรวจพบว่าเป็น Android Chrome)
+
+### ฝั่ง rig ต้องมีอะไร
+
+บิลด์ HTTP เสิร์ฟ MediaPipe runtime จาก SD ที่ path เดียวกับบิลด์ HTTPS
+โดยลงทะเบียนเป็น path ตรงตัว 5 เส้นตาม manifest ใน
+[SD card asset layout](#sd-card-asset-layout) — ไม่ใช่ prefix และไม่ใช้ `serveStatic`
+เพราะการ์ดใบเดียวกันเก็บไฟล์ session และ (บนบิลด์ HTTPS) private key ของ TLS
+
+ตรวจได้จาก serial ตอนบูต:
+
+```text
+[MOCAP] ไฟล์ MediaPipe ครบ 5/5 — กล้องพร้อมใช้
+[MOCAP] ⚠ ไฟล์ MediaPipe 3/5 บน SD — กล้องจะเริ่มไม่ได้
+```
+
+### ข้อควรรู้
+
+- โหลด wasm ครั้งแรกกินเวลาพอสมควร (หลาย MB ผ่าน SoftAP) ระหว่างนั้น rig จะหยุด
+  live stream ชั่วคราวแบบเดียวกับตอนดาวน์โหลด session
+- เวอร์ชันถูกฝังไว้ใน path และ response ส่ง `Cache-Control: immutable`
+  ดังนั้นโหลดครั้งเดียวต่อเครื่อง
+- flag นี้ผูกกับ origin ที่ระบุเท่านั้น ไม่ได้ลดความปลอดภัยของเว็บอื่น
+  แต่ควรลบออกเมื่อเลิกใช้งาน rig

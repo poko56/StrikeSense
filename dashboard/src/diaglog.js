@@ -66,6 +66,17 @@ export function initDiagLog(activeApi) {
 export function setDiagLogEnabled(on) {
   if (timer) { clearInterval(timer); timer = null; }
   if (!on) return;
+  // The rig's own log stays out of reach on HTTPS. Every fetch there is a whole
+  // TLS session out of a pool of two, and this one ran every 1.5 s — the last
+  // poller left after status and nodes moved onto the socket. It was seen
+  // holding a slot and answering `502 invalid legacy HTTP response`, which is
+  // this rig's way of saying it had no memory left to build a reply, while the
+  // live stream had nowhere to connect. Browser-side events still record here,
+  // which is what this console is needed for while debugging the connection.
+  if (location.protocol === 'https:') {
+    logLocal('DIAG', 'บนโหมดปลอดภัย: แสดงเฉพาะเหตุการณ์ในเบราว์เซอร์ (ไม่ดึง log จากเครื่อง)');
+    return;
+  }
   poll();
   timer = setInterval(poll, 1500);
 }

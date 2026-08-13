@@ -1,9 +1,7 @@
 // Thin REST wrapper around Main Node API.
-// All endpoints relative to current host; on dev (localhost) we point at 192.168.4.1.
+// All endpoints relative to current host; see rigorigin.js for the exception.
 
-const BASE = (location.hostname === 'localhost' || location.hostname === '127.0.0.1')
-  ? 'http://192.168.4.1'
-  : '';
+import { RIG_HTTP_BASE as BASE } from './rigorigin.js';
 
 // The rig deliberately has a very small TLS socket budget: one phone needs a
 // WSS stream and exactly one transient HTTPS request.  The ESP HTTPS server

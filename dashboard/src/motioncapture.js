@@ -152,11 +152,40 @@ export function cameraAccessStatus(environment = globalThis) {
   const win = environment?.window || environment;
   const nav = environment?.navigator || win?.navigator;
   if (!win || win.isSecureContext !== true) {
-    return {
-      ok: false,
-      code: 'insecure-context',
-      message: 'กล้องต้องเปิดผ่าน HTTPS ที่เชื่อถือได้',
-    };
+    // Android Chrome is the one browser where the coach can lift this
+    // themselves, and telling them so is far more use than the bare rule. The
+    // flag makes the rig's own origin a secure context, which is exactly the
+    // guarantee getUserMedia is asking for on a private access point with no
+    // route to the internet. iOS has no equivalent switch, so it gets the plain
+    // message rather than instructions that lead nowhere.
+    const ua = String(nav?.userAgent || '');
+    const androidChrome = /Android/i.test(ua) && /Chrome\//i.test(ua) &&
+                          !/EdgA|OPR|SamsungBrowser|Firefox/i.test(ua);
+    // iPadOS reports a desktop Safari UA, so the touch-point count is what
+    // separates an iPad from a Mac. Getting this wrong would offer a Mac-only
+    // remedy to a device that cannot use it.
+    const iOS = /iPhone|iPad|iPod/i.test(ua) ||
+                (/Macintosh/i.test(ua) && (nav?.maxTouchPoints || 0) > 1);
+    const origin = win.location?.origin || '';
+
+    // Name the origin that was rejected. "needs HTTPS" on its own leaves the
+    // coach unable to tell a proxy that is not running from a flag that did not
+    // take from simply having opened the wrong address — three different fixes
+    // that look identical from the message.
+    let message;
+    if (androidChrome) {
+      message = `กล้องต้องใช้ secure context — ตอนนี้เปิดผ่าน ${origin}`
+        + ' · เปิด chrome://flags → "Insecure origins treated as secure" → ใส่ '
+        + `${origin} → Relaunch`;
+    } else if (iOS) {
+      message = `กล้องต้องใช้ secure context — ตอนนี้เปิดผ่าน ${origin}`
+        + ' · iOS ไม่มีสวิตช์ยกเว้น ต้องเปิดผ่าน HTTPS ที่ trusted เท่านั้น';
+    } else {
+      message = `กล้องต้องใช้ secure context — ตอนนี้เปิดผ่าน ${origin}`
+        + ' · บนคอมให้รัน tools/rig-localhost-proxy.py แล้วเปิด http://localhost:8080/'
+        + ' (localhost เป็น secure context อยู่แล้ว)';
+    }
+    return { ok: false, code: 'insecure-context', message, origin, androidChrome, iOS };
   }
   if (typeof nav?.mediaDevices?.getUserMedia !== 'function') {
     return {

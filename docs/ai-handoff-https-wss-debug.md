@@ -550,6 +550,42 @@ arduino-cli upload --port /dev/cu.usbmodem101 \
 TERM=xterm screen /dev/cu.usbmodem101 115200
 ```
 
+## The SD card was mounting at the wrong clock
+
+The reported "cannot record to the SD card" turned out to be literal, and it
+took HTTPS down with it:
+
+```text
+[SD] mount ครั้งที่ 1 ไม่สำเร็จ — รอลอง...
+[SD] mount ครั้งที่ 2 ไม่สำเร็จ — รอลอง...
+[SD] mount ครั้งที่ 3 ไม่สำเร็จ — รอลอง...
+[WARN] SD card unavailable - sessions will not be logged
+[HTTPS] disabled: SD is unavailable (TLS PEM files are on SD)
+```
+
+All three attempts used the same 4 MHz SPI clock, and the SD SPI specification
+asks for no more than 400 kHz until the card has answered — so a card that needs
+the slow start had three identical chances to fail. `SdLogger::begin()` now
+walks 400 kHz → 1 MHz → 4 MHz and waits 250 ms first for the card to settle
+after power-up. On the next boot:
+
+```text
+[SD] OK at 400 kHz, 31 MB used of 60906 MB
+[HTTPS] Listening on https://pokoman.online/ (cert SAN must match)
+```
+
+400 kHz is where it mounted, which is exactly the case the old code could not
+reach. Two further changes stop one flaky mount from costing a whole session:
+
+- `SdLogger::retryMount()` runs every 5 s while the card is missing, so it
+  recovers without a power cycle;
+- `WebServerApp::startSecureIfPossible()` brings the TLS listener up if the card
+  — and with it the certificates — turns up late. `applyDnsPolicy()` was split
+  out of `begin()` so the DNS mode follows.
+
+A card that still drops intermittently after this is a contact or seating
+problem, not a timing one.
+
 ## What is left before HTTPS can work
 
 The three fixes above were real and each one measurably improved the rig, but

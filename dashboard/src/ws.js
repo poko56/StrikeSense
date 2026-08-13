@@ -17,6 +17,7 @@ import { ingestBatch } from './analyzer.js';
 import { logSensorData } from './logger.js';
 import { logLocal } from './diaglog.js';
 import { createRigClockMapper } from './rigclock.js';
+import { rigWsHost } from './rigorigin.js';
 
 const ACCEL_LSB_PER_G  = 2048;
 const GYRO_LSB_PER_DPS = 16.4;
@@ -60,9 +61,7 @@ export function startWs() {
   rigClock.reset();
 
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const host  = (location.hostname === 'localhost' || location.hostname === '127.0.0.1')
-    ? '192.168.4.1' : location.host;
-  state.wsUrl = `${proto}//${host}/ws`;
+  state.wsUrl = `${proto}//${rigWsHost()}/ws`;
 
   let ws;
   try { ws = new WebSocket(state.wsUrl); }
@@ -91,9 +90,34 @@ export function startWs() {
   };
   ws.onerror = () => { /* close fires next */ };
   ws.onmessage = ev => {
-    if (typeof ev.data === 'string') return;
+    if (typeof ev.data === 'string') { handleTextFrame(ev.data); return; }
     decodeMessage(ev.data);
   };
+}
+
+// Rig state arriving as a push instead of a poll.
+//
+// On HTTPS every REST call costs a whole TLS session out of a pool of two, and
+// the 3 s status / 5 s nodes polls held one of them permanently — the live
+// stream could never claim a socket, and a rig with healthy nodes and a mounted
+// SD card reported neither. The same JSON now rides the socket that is already
+// open, so the secure dashboard polls for nothing.
+//
+// `onState` is how main.js keeps its own session-sync and node-history logic in
+// one place rather than duplicating it here.
+const stateListeners = new Set();
+export function onRigState(fn) {
+  stateListeners.add(fn);
+  return () => stateListeners.delete(fn);
+}
+
+function handleTextFrame(text) {
+  let msg = null;
+  try { msg = JSON.parse(text); } catch { return; }   // not ours — ignore
+  if (!msg || msg.t !== 'state') return;
+  for (const fn of stateListeners) {
+    try { fn(msg); } catch (e) { logLocal('WS', `onRigState listener: ${e.message}`); }
+  }
 }
 
 /** Detach handlers and close, without triggering our own reconnect logic. */

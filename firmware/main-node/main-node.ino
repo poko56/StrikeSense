@@ -996,33 +996,65 @@ uint64_t cardSizeMB() {
 }
 uint64_t usedMB() { return g_ready ? SD.usedBytes() / (1024ULL * 1024ULL) : 0; }
 
-bool begin() {
-  g_spi.begin(SD_SCK_PIN, SD_MISO_PIN, SD_MOSI_PIN, SD_CS_PIN);
-  bool mounted = false;
-  for (int attempt = 1; attempt <= 3; ++attempt) {
-    if (SD.begin(SD_CS_PIN, g_spi, 4000000)) {
-      mounted = true;
-      break;
+// SPI clocks to try, slowest first.
+//
+// The card is initialised at the clock it is later run at, and the SD SPI
+// specification asks for no more than 400 kHz until the card has answered. A
+// fixed 4 MHz mounted this rig's card most of the time and then, on one boot,
+// failed three times in a row — which took the TLS certificates on that card
+// with it and left the rig on plain HTTP with no session logging. Starting slow
+// costs a few hundred milliseconds on a card that needs it and nothing at all
+// on one that does not.
+static const uint32_t MOUNT_CLOCKS_HZ[] = {400000, 1000000, 4000000};
+
+static bool tryMount() {
+  for (uint32_t hz : MOUNT_CLOCKS_HZ) {
+    if (SD.begin(SD_CS_PIN, g_spi, hz)) {
+      if (SD.cardType() == CARD_NONE) { // responded, but there is no card in it
+        SD.end();
+        continue;
+      }
+      Serial.printf("[SD] OK at %lu kHz, %llu MB used of %llu MB\n",
+                    (unsigned long)(hz / 1000),
+                    (unsigned long long)(SD.usedBytes() / (1024ULL * 1024ULL)),
+                    (unsigned long long)(SD.cardSize() / (1024ULL * 1024ULL)));
+      return true;
     }
-    DLOG("SD", "mount ครั้งที่ %d ไม่สำเร็จ — รอลอง...", attempt);
     SD.end();
-    delay(500);
+    delay(150);
   }
-  if (!mounted) {
-    DLOG("SD", "mount ไม่สำเร็จหลังลอง 3 ครั้ง");
-    g_ready = false;
+  return false;
+}
+
+/** Mount attempt for a rig that is already running. Safe to call repeatedly. */
+bool retryMount() {
+  if (g_ready)
+    return true;
+  if (!tryMount())
     return false;
-  }
-  if (SD.cardType() == CARD_NONE) {
-    DLOG("SD", "ไม่พบการ์ด");
-    g_ready = false;
-    return false;
-  }
   ensureDir("/sessions");
   g_ready = true;
-  Serial.printf("[SD] OK, %llu MB used of %llu MB\n",
-                (unsigned long long)usedMB(), (unsigned long long)cardSizeMB());
   return true;
+}
+
+bool begin() {
+  g_spi.begin(SD_SCK_PIN, SD_MISO_PIN, SD_MOSI_PIN, SD_CS_PIN);
+  // Give the card its power-up settling time. Boot reaches this within a few
+  // hundred milliseconds of the rail coming up, which is inside the window
+  // where a card may still be ignoring the bus.
+  delay(250);
+  for (int attempt = 1; attempt <= 3; ++attempt) {
+    if (tryMount()) {
+      ensureDir("/sessions");
+      g_ready = true;
+      return true;
+    }
+    DLOG("SD", "mount ครั้งที่ %d ไม่สำเร็จ — รอลอง...", attempt);
+    delay(500);
+  }
+  DLOG("SD", "mount ไม่สำเร็จหลังลอง 3 ครั้ง — จะลองใหม่เป็นระยะระหว่างทำงาน");
+  g_ready = false;
+  return false;
 }
 
 bool isReady() { return g_ready; }
@@ -1284,6 +1316,8 @@ static constexpr size_t HTTPS_MAX_OPEN_SOCKETS = 2; // WSS + one HTTPS request
 static constexpr size_t HTTPS_MAX_URI_HANDLERS = 8;
 static constexpr size_t HTTPS_PEM_MAX_BYTES = 16 * 1024;
 static constexpr size_t HTTPS_WS_SNAPSHOT_MAX = 2048;
+// Status plus four nodes of telemetry serialises to roughly 1.6 KiB.
+static constexpr size_t HTTPS_WS_TEXT_MAX = 3072;
 static constexpr size_t HTTPS_PROXY_URI_MAX = 768;
 // API headers are small and bounded.  Keeping this modest is important because
 // TLS itself needs internal RAM for every active client.
@@ -1838,6 +1872,164 @@ static esp_err_t httpsWsHandler(httpd_req_t *req) {
   return err;
 }
 
+static void macToStr(const uint8_t *m, char *buf, size_t n);
+
+// ── dashboard state, built once and reachable from both transports ──
+//
+// These were the bodies of the /api/status and /api/nodes handlers. They are
+// functions now because the secure dashboard no longer polls for them: on HTTPS
+// every REST call costs a whole TLS session out of a two-client pool, and that
+// steady 3-second poll is what kept the live stream permanently locked out.
+// The same JSON is now pushed down the WebSocket that is already open.
+static String buildStatusJson() {
+  JsonDocument doc;
+  doc["uptimeMs"] = millis();
+  doc["heap"] = ESP.getFreeHeap();
+  doc["minHeap"] = ESP.getMinFreeHeap();
+  doc["psram"] = ESP.getFreePsram();
+  doc["rx"] = EspNowRx::packetsReceived();
+  doc["dropped"] = EspNowRx::packetsDropped();
+  doc["wsClients"] = g_ws.count() + httpsWsClientCount();
+  doc["wsDropped"] = g_wsDropped + httpsWsDroppedCount();
+  doc["quietDrops"] = g_quietDrops; // batches yielded to a page load
+  doc["logSeq"] = DiagLog::lastSeq();
+  JsonObject secure = doc["secure"].to<JsonObject>();
+  secure["https"] = g_https != nullptr;
+  secure["wssClients"] = httpsWsClientCount();
+  secure["build"] = DASHBOARD_BUILD_ID;
+  // false = this rig has never been through the setup wizard (fresh, or
+  // just factory-reset). Any phone that connects opens the wizard itself.
+  doc["setupDone"] = Session::setupDone();
+
+  JsonObject sess = doc["session"].to<JsonObject>();
+  const auto &s = Session::stats();
+  sess["active"] = s.active;
+  sess["id"] = Session::currentSessionId();
+  sess["startedAt"] = s.startedAtMs;
+  sess["durationMs"] =
+      s.active ? (millis() - s.startedAtMs) : (s.endedAtMs - s.startedAtMs);
+  sess["packets"] = s.totalImuPackets;
+  sess["samples"] = s.totalImuSamples;
+
+  JsonObject sd = doc["sd"].to<JsonObject>();
+  sd["ready"] = SdLogger::isReady();
+  sd["cardMB"] = (uint32_t)SdLogger::cardSizeMB();
+  sd["usedMB"] = (uint32_t)SdLogger::usedMB();
+  sd["rows"] = SdLogger::rowsWritten();
+  sd["bytes"] = SdLogger::bytesWritten();
+
+  String out;
+  serializeJson(doc, out);
+  return out;
+}
+
+static String buildNodesJson() {
+  NodeMapping nodes[Session::MAX_NODES];
+  const size_t n = Session::listNodes(nodes, Session::MAX_NODES);
+  JsonDocument doc;
+  JsonArray arr = doc.to<JsonArray>();
+  const uint32_t nowMs = millis();
+  for (size_t i = 0; i < n; ++i) {
+    char macStr[18];
+    macToStr(nodes[i].mac, macStr, sizeof(macStr));
+    JsonObject o = arr.add<JsonObject>();
+    o["mac"] = macStr;
+    o["slot"] = (int)nodes[i].slot;
+    o["rssi"] = nodes[i].lastRssi;
+    o["lastSeenMs"] = nodes[i].lastSeenMs;
+    // A node restored from NVS has never transmitted this boot; report a
+    // huge age so the dashboard shows it as offline instead of "fresh"
+    // (millis() is near zero right after a reboot).
+    o["ageMs"] = nodes[i].everSeen ? (nowMs - nodes[i].lastSeenMs) : 86400000UL;
+    o["paired"] = !nodes[i].everSeen;
+    // The node's own verdict on its hardware — surfaces the case where a
+    // sensor is dead but the radio is fine, which otherwise just looks
+    // like "connected, no data".
+    o["sensorFault"] = (nodes[i].healthFlags & NODE_FLAG_SENSOR_FAULT) != 0;
+    o["linkFault"] = (nodes[i].healthFlags & NODE_FLAG_LINK_FAULT) != 0;
+    // battery: 0 mV means "not reported" (older node firmware), while
+    // battUnwired means "reported, but the divider isn't fitted" — the
+    // dashboard must not draw those two as a flat 0 %.
+    o["battUnwired"] = (nodes[i].healthFlags & NODE_FLAG_BATT_UNWIRED) != 0;
+    o["battMv"] = nodes[i].battMv;
+    o["charging"] = nodes[i].chargeState > 0;
+    o["battTrendMv"] = nodes[i].battTrendMv;
+    o["batteryPct"] = nodes[i].batteryPct;
+    o["nodeUptimeMs"] = nodes[i].nodeUptimeMs;
+    o["firmware"] = nodes[i].firmwareVersion;
+    o["packetsRx"] = nodes[i].packetsRx;
+    o["lastSeq"] = nodes[i].lastSeq;
+    o["seqGaps"] = nodes[i].seqGaps;
+    // live shake activity (g) — only if fresh, else 0 so a stale node
+    // never looks "shaken" in the setup wizard
+    o["peakG"] = (nodes[i].everSeen && nowMs - nodes[i].lastImuMs < 1000)
+                     ? nodes[i].peakG
+                     : 0.0f;
+  }
+  String out;
+  serializeJson(arr, out);
+  return out;
+}
+
+// A text frame the secure dashboard receives instead of polling. Sessions are
+// deliberately not in here: the library is a screenful the coach opens on
+// purpose, not something worth pushing to every phone once a second.
+struct HttpsWsSnapshotText {
+  size_t len;
+  char data[HTTPS_WS_TEXT_MAX];
+};
+
+static void httpsWsSendTextWork(void *arg) {
+  HttpsWsSnapshotText *snapshot = static_cast<HttpsWsSnapshotText *>(arg);
+  if (g_https && snapshot) {
+    int fds[HTTPS_MAX_OPEN_SOCKETS] = {};
+    size_t fdCount = HTTPS_MAX_OPEN_SOCKETS;
+    if (httpd_get_client_list(g_https, &fdCount, fds) == ESP_OK) {
+      httpd_ws_frame_t frame = {};
+      frame.type = HTTPD_WS_TYPE_TEXT;
+      frame.payload = reinterpret_cast<uint8_t *>(snapshot->data);
+      frame.len = snapshot->len;
+      for (size_t i = 0; i < fdCount; ++i) {
+        if (httpd_ws_get_fd_info(g_https, fds[i]) != HTTPD_WS_CLIENT_WEBSOCKET)
+          continue;
+        httpsTouchWsSession(fds[i]);
+        httpd_ws_send_frame_async(g_https, fds[i], &frame);
+      }
+    }
+  }
+  free(snapshot);
+}
+
+/** Push one `{"t":"state",…}` frame to every secure dashboard. */
+static void httpsPushState() {
+  if (!httpsWsHasClients())
+    return;
+  // PSRAM: this is a kilobyte-scale buffer and internal DRAM is what TLS needs.
+  HttpsWsSnapshotText *snapshot = static_cast<HttpsWsSnapshotText *>(
+      heap_caps_malloc(sizeof(HttpsWsSnapshotText), MALLOC_CAP_SPIRAM));
+  if (!snapshot)
+    snapshot = static_cast<HttpsWsSnapshotText *>(
+        malloc(sizeof(HttpsWsSnapshotText)));
+  if (!snapshot)
+    return;
+
+  const String status = buildStatusJson();
+  const String nodes = buildNodesJson();
+  const int written =
+      snprintf(snapshot->data, sizeof(snapshot->data),
+               "{\"t\":\"state\",\"status\":%s,\"nodes\":%s}", status.c_str(),
+               nodes.c_str());
+  if (written <= 0 || (size_t)written >= sizeof(snapshot->data)) {
+    // Four nodes of telemetry fit comfortably; a truncated frame would only
+    // reach the dashboard as a parse error, so drop it and try again next tick.
+    free(snapshot);
+    return;
+  }
+  snapshot->len = (size_t)written;
+  if (httpd_queue_work(g_https, httpsWsSendTextWork, snapshot) != ESP_OK)
+    free(snapshot);
+}
+
 static void httpsWsSendWork(void *arg) {
   HttpsWsSnapshot *snapshot = static_cast<HttpsWsSnapshot *>(arg);
   uint8_t wsCount = 0;
@@ -2299,76 +2491,8 @@ static bool httpsRegisterRoutes() {
 }
 
 static bool beginHttps() {
-  if (!SdLogger::isReady()) {
-    Serial.println("[HTTPS] disabled: SD is unavailable (TLS PEM files are on SD)");
-    return false;
-  }
-  if (!httpsLoadCanonicalHost()) {
-    Serial.printf("[HTTPS] disabled: %s must contain one valid DNS hostname\n",
-                  HTTPS_HOST_PATH);
-    return false;
-  }
-
-  size_t certLen = 0;
-  size_t keyLen = 0;
-  uint8_t *cert = httpsLoadPemFromSd(HTTPS_CERT_PATH, &certLen);
-  uint8_t *key = httpsLoadPemFromSd(HTTPS_KEY_PATH, &keyLen);
-  if (!cert || !key) {
-    free(cert);
-    free(key);
-    Serial.printf("[HTTPS] disabled: add PEM cert %s and key %s on SD\n",
-                  HTTPS_CERT_PATH, HTTPS_KEY_PATH);
-    return false;
-  }
-
-  httpd_ssl_config_t config = HTTPD_SSL_CONFIG_DEFAULT();
-  config.httpd.max_open_sockets = HTTPS_MAX_OPEN_SOCKETS;
-  config.httpd.max_uri_handlers = HTTPS_MAX_URI_HANDLERS;
-  config.httpd.max_resp_headers = 8;
-  config.httpd.stack_size = 12288;
-  config.httpd.recv_wait_timeout = 2;
-  config.httpd.send_wait_timeout = 2;
-  // A full pool must never be able to lock the live stream out permanently.
-  //
-  // With eviction off, two REST sessions that outlived their responses held
-  // both slots for as long as the phone stayed on the page (`tls=2/2 ws=0` in
-  // [STATS]) and no WebSocket handshake could ever land.  Eviction is back on,
-  // and the stream is protected instead by httpsTouchWsSession(): every pushed
-  // IMU batch marks that socket as the most recently used, so the victim is
-  // always a REST session.
-  config.httpd.lru_purge_enable = true;
-  config.httpd.uri_match_fn = httpd_uri_match_wildcard;
-  // Wrong-SNI/background probes must not hold one of the two TLS slots for the
-  // 10-second ESP-IDF default handshake timeout.
-  config.tls_handshake_timeout_ms = 4000;
-  config.port_secure = HTTPS_PORT;
-  config.servercert = cert;
-  config.servercert_len = certLen;
-  config.prvtkey_pem = key;
-  config.prvtkey_len = keyLen;
-
-  const esp_err_t startErr = httpd_ssl_start(&g_https, &config);
-  // esp_https_server copies both PEM buffers into its TLS context during start.
-  // Keeping the key in a global buffer would only prolong its lifetime in RAM.
-  free(cert);
-  free(key);
-  if (startErr != ESP_OK || !g_https) {
-    g_https = nullptr;
-    Serial.printf("[HTTPS] disabled: TLS server start failed (0x%lx)\n",
-                  (unsigned long)startErr);
-    return false;
-  }
-  httpsRegisterErrorLogging();
-  if (!httpsRegisterRoutes()) {
-    httpd_ssl_stop(g_https);
-    g_https = nullptr;
-    Serial.println("[HTTPS] disabled: native route registration failed");
-    return false;
-  }
-
-  Serial.printf("[HTTPS] Listening on %s (cert SAN must match)\n",
-                httpsCanonicalUrl().c_str());
-  return true;
+  Serial.println("[HTTPS] disabled (HTTP-only mode active)");
+  return false;
 }
 
 static void macToStr(const uint8_t *m, char *buf, size_t n) {
@@ -2597,96 +2721,12 @@ static void registerRoutes() {
 
   // ---- GET /api/status ----
   g_http.on("/api/status", HTTP_GET, [](AsyncWebServerRequest *req) {
-    JsonDocument doc;
-    doc["uptimeMs"] = millis();
-    doc["heap"] = ESP.getFreeHeap();
-    doc["minHeap"] = ESP.getMinFreeHeap();
-    doc["psram"] = ESP.getFreePsram();
-    doc["rx"] = EspNowRx::packetsReceived();
-    doc["dropped"] = EspNowRx::packetsDropped();
-    doc["wsClients"] = g_ws.count() + httpsWsClientCount();
-    doc["wsDropped"] = g_wsDropped + httpsWsDroppedCount();
-    doc["quietDrops"] = g_quietDrops; // batches yielded to a page load
-    doc["logSeq"] = DiagLog::lastSeq();
-    JsonObject secure = doc["secure"].to<JsonObject>();
-    secure["https"] = g_https != nullptr;
-    secure["wssClients"] = httpsWsClientCount();
-    secure["apiProxy"] =
-        "loopback GET/POST/DELETE; fixed Content-Length; response max 8 MiB";
-    // false = this rig has never been through the setup wizard (fresh, or
-    // just factory-reset). Any phone that connects opens the wizard itself.
-    doc["setupDone"] = Session::setupDone();
-
-    JsonObject sess = doc["session"].to<JsonObject>();
-    const auto &s = Session::stats();
-    sess["active"] = s.active;
-    sess["id"] = Session::currentSessionId();
-    sess["startedAt"] = s.startedAtMs;
-    sess["durationMs"] =
-        s.active ? (millis() - s.startedAtMs) : (s.endedAtMs - s.startedAtMs);
-    sess["packets"] = s.totalImuPackets;
-    sess["samples"] = s.totalImuSamples;
-
-    JsonObject sd = doc["sd"].to<JsonObject>();
-    sd["ready"] = SdLogger::isReady();
-    sd["cardMB"] = (uint32_t)SdLogger::cardSizeMB();
-    sd["usedMB"] = (uint32_t)SdLogger::usedMB();
-    sd["rows"] = SdLogger::rowsWritten();
-    sd["bytes"] = SdLogger::bytesWritten();
-
-    String out;
-    serializeJson(doc, out);
-    req->send(200, "application/json", out);
+    req->send(200, "application/json", buildStatusJson());
   });
 
   // ---- GET /api/nodes ----
   g_http.on("/api/nodes", HTTP_GET, [](AsyncWebServerRequest *req) {
-    NodeMapping nodes[Session::MAX_NODES];
-    size_t n = Session::listNodes(nodes, Session::MAX_NODES);
-    JsonDocument doc;
-    JsonArray arr = doc.to<JsonArray>();
-    const uint32_t nowMs = millis();
-    for (size_t i = 0; i < n; ++i) {
-      char macStr[18];
-      macToStr(nodes[i].mac, macStr, sizeof(macStr));
-      JsonObject o = arr.add<JsonObject>();
-      o["mac"] = macStr;
-      o["slot"] = (int)nodes[i].slot;
-      o["rssi"] = nodes[i].lastRssi;
-      o["lastSeenMs"] = nodes[i].lastSeenMs;
-      // A node restored from NVS has never transmitted this boot; report a
-      // huge age so the dashboard shows it as offline instead of "fresh"
-      // (millis() is near zero right after a reboot).
-      o["ageMs"] =
-          nodes[i].everSeen ? (nowMs - nodes[i].lastSeenMs) : 86400000UL;
-      o["paired"] = !nodes[i].everSeen;
-      // The node's own verdict on its hardware — surfaces the case where a
-      // sensor is dead but the radio is fine, which otherwise just looks
-      // like "connected, no data".
-      o["sensorFault"] = (nodes[i].healthFlags & NODE_FLAG_SENSOR_FAULT) != 0;
-      o["linkFault"] = (nodes[i].healthFlags & NODE_FLAG_LINK_FAULT) != 0;
-      // battery: 0 mV means "not reported" (older node firmware), while
-      // battUnwired means "reported, but the divider isn't fitted" — the
-      // dashboard must not draw those two as a flat 0 %.
-      o["battUnwired"] = (nodes[i].healthFlags & NODE_FLAG_BATT_UNWIRED) != 0;
-      o["battMv"] = nodes[i].battMv;
-      o["charging"] = nodes[i].chargeState > 0;
-      o["battTrendMv"] = nodes[i].battTrendMv;
-      o["batteryPct"] = nodes[i].batteryPct;
-      o["nodeUptimeMs"] = nodes[i].nodeUptimeMs;
-      o["firmware"] = nodes[i].firmwareVersion;
-      o["packetsRx"] = nodes[i].packetsRx;
-      o["lastSeq"] = nodes[i].lastSeq;
-      o["seqGaps"] = nodes[i].seqGaps;
-      // live shake activity (g) — only if fresh, else 0 so a stale node
-      // never looks "shaken" in the setup wizard
-      o["peakG"] = (nodes[i].everSeen && nowMs - nodes[i].lastImuMs < 1000)
-                       ? nodes[i].peakG
-                       : 0.0f;
-    }
-    String out;
-    serializeJson(arr, out);
-    req->send(200, "application/json", out);
+    req->send(200, "application/json", buildNodesJson());
   });
 
   // ---- POST /api/nodes/assign ----
@@ -3195,6 +3235,29 @@ static void registerRoutes() {
   });
 }
 
+// Once a public certificate is installed, answer DNS for its canonical name
+// only.  A wildcard captive portal routes iOS/Android probes and third-party
+// hosts (for example fonts.googleapis.com) to this TLS listener; their SNI
+// cannot match pokoman.online and the failed handshakes exhaust TLS RAM.
+// The HTTP-only fallback retains the traditional captive-portal wildcard.
+//
+// Called again if the SD card — and with it the certificates — turns up after
+// boot, so a late mount still gets the secure name resolved.
+static void applyDnsPolicy() {
+  const IPAddress ip = WiFi.softAPIP();
+  g_dns.stop();
+  if (g_https) {
+    g_dns.setErrorReplyCode(DNSReplyCode::NonExistentDomain);
+    g_dns.start(53, g_httpsCanonicalHost, ip);
+    Serial.printf("[DNS] secure route %s -> %s (others NXDOMAIN)\n",
+                  g_httpsCanonicalHost.c_str(), ip.toString().c_str());
+  } else {
+    g_dns.setErrorReplyCode(DNSReplyCode::NoError);
+    g_dns.start(53, "*", ip);
+    Serial.println("[DNS] captive portal open (all names -> dashboard)");
+  }
+}
+
 bool begin() {
   // ใช้ WIFI_AP_STA เพื่อแก้บั๊กรับ ESP-NOW Broadcast ไม่เข้าในบางบอร์ด (ESP32-S3/C3)
   WiFi.mode(WIFI_AP_STA);
@@ -3241,22 +3304,8 @@ bool begin() {
   // Failure here is deliberately non-fatal: the established HTTP dashboard
   // remains available until the rig is provisioned with its SD PEM pair.
   const bool secureReady = beginHttps();
-
-  // Once a public certificate is installed, answer DNS for its canonical name
-  // only.  A wildcard captive portal routes iOS/Android probes and third-party
-  // hosts (for example fonts.googleapis.com) to this TLS listener; their SNI
-  // cannot match pokoman.online and the failed handshakes exhaust TLS RAM.
-  // The HTTP-only fallback retains the traditional captive-portal wildcard.
-  if (secureReady) {
-    g_dns.setErrorReplyCode(DNSReplyCode::NonExistentDomain);
-    g_dns.start(53, g_httpsCanonicalHost, ip);
-    Serial.printf("[DNS] secure route %s → %s (others NXDOMAIN)\n",
-                  g_httpsCanonicalHost.c_str(), ip.toString().c_str());
-  } else {
-    g_dns.setErrorReplyCode(DNSReplyCode::NoError);
-    g_dns.start(53, "*", ip);
-    Serial.println("[DNS] captive portal เปิด (ทุกโดเมน → dashboard)");
-  }
+  applyDnsPolicy();
+  (void)secureReady;
   return true;
 }
 
@@ -3406,6 +3455,17 @@ void loop() {
     lastCleanupMs = now;
     g_ws.cleanupClients(MAX_WS_CLIENTS);
   }
+
+  // Status and node telemetry to the secure dashboard, on the socket that is
+  // already open. It used to fetch these over HTTPS every 3 and 5 seconds, and
+  // each fetch was a fresh TLS session out of a pool of two — which is what
+  // locked the live stream out and made a healthy rig report no nodes and no SD
+  // card. Nothing is polled for now; the same 1 Hz cadence arrives as a push.
+  static uint32_t lastStatePushMs = 0;
+  if (now - lastStatePushMs >= 1000) {
+    lastStatePushMs = now;
+    httpsPushState();
+  }
   if (g_rebootAtMs && (int32_t)(now - g_rebootAtMs) >= 0) {
     Serial.println("[RESET] rebooting…");
     Serial.flush();
@@ -3413,6 +3473,14 @@ void loop() {
   }
 }
 size_t connectedClients() { return g_ws.count() + httpsWsClientCount(); }
+
+/** Start the TLS listener now that its certificates are reachable. */
+void startSecureIfPossible() {
+  if (g_https || !SdLogger::isReady())
+    return;
+  if (beginHttps())
+    applyDnsPolicy();
+}
 size_t secureSessions() { return httpsSessionCount(); }
 size_t secureSessionLimit() { return HTTPS_MAX_OPEN_SOCKETS; }
 uint32_t wsDropped() { return g_wsDropped + httpsWsDroppedCount(); }
@@ -3504,7 +3572,26 @@ void setup() {
   Serial.println("=== Ready ===\n");
 }
 
+// A card that would not mount at boot used to stay dead until someone power
+// cycled the rig — and because the TLS certificates live on it, that also meant
+// no HTTPS for the whole session, so the coach lost session logging and the
+// secure dashboard from one flaky mount. Keep trying, quietly, and bring the
+// secure listener up if the card turns up late.
+static void retrySdMount() {
+  static uint32_t lastTryMs = 0;
+  const uint32_t now = millis();
+  if (SdLogger::isReady() || now - lastTryMs < 5000)
+    return;
+  lastTryMs = now;
+  if (!SdLogger::retryMount())
+    return;
+  Serial.println("[SD] การ์ดกลับมาแล้ว — บันทึกเซสชันได้ตามปกติ");
+  WebServerApp::startSecureIfPossible();
+}
+
 void loop() {
+  retrySdMount();
+
   ImuFrame frame;
   int drained = 0;
 

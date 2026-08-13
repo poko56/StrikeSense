@@ -8,7 +8,7 @@ import {
 } from './ui.js';
 import { initSetup, openSetupWizard } from './setup.js';
 import { api as realApi, releaseInitialRequestGate, openRequestLane } from './api.js';
-import { startWs, onWsOpen } from './ws.js';
+import { startWs, onWsOpen, onRigState } from './ws.js';
 import {
   applyPreset, resetTimer, skipPhase, tickTimer, onPhaseChange,
   setStopwatch, startOrResumeTimer, pauseTimer,
@@ -351,33 +351,52 @@ const SESSION_SYNC_GRACE_MS = 2500;
 
 async function pollStatus() {
   try {
-    const s = await api.status();
-    state.hostStatus = s;
-    if (s?.session && Date.now() - _sessionCmdAtMs > SESSION_SYNC_GRACE_MS) {
-      const wasActive = state.session.active;
-      state.session.active = !!s.session.active;
-      state.session.id     = s.session.id || state.session.id;
-      if (s.session.active) state.session.startedAtMs = Date.now() - (s.session.durationMs || 0);
-      if (wasActive !== state.session.active) {
-        // The rig changed state without us — another phone pressed REC, or a round
-        // ended. Every connected dashboard follows, clock included, so two coaches
-        // watching the same rig see the same round.
-        if (state.session.active) startOrResumeTimer();
-        else                      pauseTimer();
-        scheduleRender();
-      }
-    }
-    scheduleRender();
+    applyStatus(await api.status());
   } catch (e) {}
 }
+
+function applyStatus(s) {
+  if (!s) return;
+  state.hostStatus = s;
+  if (s.session && Date.now() - _sessionCmdAtMs > SESSION_SYNC_GRACE_MS) {
+    const wasActive = state.session.active;
+    state.session.active = !!s.session.active;
+    state.session.id     = s.session.id || state.session.id;
+    if (s.session.active) state.session.startedAtMs = Date.now() - (s.session.durationMs || 0);
+    if (wasActive !== state.session.active) {
+      // The rig changed state without us — another phone pressed REC, or a round
+      // ended. Every connected dashboard follows, clock included, so two coaches
+      // watching the same rig see the same round.
+      if (state.session.active) startOrResumeTimer();
+      else                      pauseTimer();
+    }
+  }
+  scheduleRender();
+}
+
 async function pollNodes() {
   try {
-    const list = await api.nodes();
-    state.nodes = Array.isArray(list) ? list : [];
-    trackNodeHistory(state.nodes);
-    scheduleRender();
+    applyNodes(await api.nodes());
   } catch (e) {}
 }
+
+function applyNodes(list) {
+  state.nodes = Array.isArray(list) ? list : [];
+  trackNodeHistory(state.nodes);
+  scheduleRender();
+}
+
+// The rig pushes the same status and node telemetry down the open WebSocket, so
+// the secure dashboard never has to spend a TLS session on a poll. Whichever
+// transport delivers it, it lands in the same two functions.
+let pushedStateAtMs = 0;
+onRigState(msg => {
+  pushedStateAtMs = performance.now();
+  applyStatus(msg.status);
+  applyNodes(msg.nodes);
+});
+/** True while the rig's own pushes are arriving; polling then has nothing to do. */
+const stateIsPushed = () => performance.now() - pushedStateAtMs < 4000;
 
 const STALE_MS = 8000; // 8s — Strike Node sends status every 1s; allow up to 8 missed packets before marking stale
 
@@ -490,9 +509,14 @@ function openRestLane() {
   if (restLaneOpened) return;
   restLaneOpened = true;
   openRequestLane();
-  // Bootstrap reads: cheap status/nodes/sessions only. The model download waits
-  // until these are done — see startAiModelLoad().
-  void Promise.all([pollStatus(), pollNodes(), refreshLib()]).finally(() => {
+  // Bootstrap reads. Status and nodes are skipped when the rig has already
+  // pushed them down the socket, which on a healthy secure connection it has by
+  // the time this runs — that leaves the library as the only opening request.
+  // The model download waits until these are done; see startAiModelLoad().
+  const bootstrap = stateIsPushed()
+    ? [refreshLib()]
+    : [pollStatus(), pollNodes(), refreshLib()];
+  void Promise.all(bootstrap).finally(() => {
     resolveHydration();
     releaseInitialRequestGate();
     startAiModelLoad();
@@ -508,12 +532,14 @@ onWsOpen(openRestLane);
 setTimeout(openRestLane, demo ? 0 : REST_LANE_GRACE_MS);
 
 // Every REST poll on HTTPS costs a full TLS handshake, because each one-shot
-// response closes its session to free the slot. At 1.5 s + 2 s the rig spent
-// most of its internal heap on handshakes that compete with the live stream;
-// none of this data is time-critical (the IMU feed comes over WSS).
+// response closes its session to free the slot, and the rig has two. So these
+// are a fallback, not the normal path: while the socket is pushing state they
+// stand down entirely, and they only take over if those pushes stop — an older
+// rig build that does not send them, or a stream that has dropped.
 const SECURE = location.protocol === 'https:';
-setInterval(paced(pollStatus), SECURE ? 3000 : 1500);
-setInterval(paced(pollNodes),  SECURE ? 5000 : 2000);
+const pollsIfNotPushed = fn => paced(() => { if (!stateIsPushed()) fn(); });
+setInterval(pollsIfNotPushed(pollStatus), SECURE ? 3000 : 1500);
+setInterval(pollsIfNotPushed(pollNodes),  SECURE ? 5000 : 2000);
 setInterval(paced(refreshLib, { onlyTab: 'library' }), 10000);
 
 // Coming back to the app: refresh at once instead of waiting out the interval.
