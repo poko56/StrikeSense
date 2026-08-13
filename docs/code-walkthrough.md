@@ -97,7 +97,7 @@ auto sendDashboard = [](AsyncWebServerRequest* req) {
 | [`main.js`](../dashboard/src/main.js) | Entry — ต่อ state ↔ ws ↔ ui ↔ timer ↔ logger ↔ AI classifier เข้าด้วยกัน |
 | [`ws.js`](../dashboard/src/ws.js) | ถอด binary WebSocket frame → sample objects + reconnect |
 | [`analyzer.js`](../dashboard/src/analyzer.js) | ตรวจจับ "หมัด" จากสัญญาณ (threshold + refractory) |
-| [`motioncapture.js`](../dashboard/src/motioncapture.js) | ประมวลผล MediaPipe Pose Landmarker + โหลดโมเดล TensorFlow.js AI |
+| [`motioncapture.js`](../dashboard/src/motioncapture.js) | โหลดโมเดล TensorFlow.js AI *(ฟีเจอร์กล้อง MediaPipe Pose ยังไม่เปิดใช้งาน)* |
 | [`physics.js`](../dashboard/src/physics.js) | คำนวณฟิสิกส์แรงปะทะ (Live Impact Power, Velocity, Kinetic Energy) |
 | [`strikescore.js`](../dashboard/src/strikescore.js) | ประเมินดัชนีคะแนนความแม่นยำและแรงปะทะ (0–100 Strike Score) |
 | [`posemath.js`](../dashboard/src/posemath.js) | เวกเตอร์และฟังก์ชันคำนวณเรขาคณิตของข้อต่อร่างกาย 3D |

@@ -52,14 +52,18 @@ docs/             # Full system documentation & technical specs
 
 ## System Status
 
+> [!WARNING]
+> **หมายเหตุเกี่ยวกับ Motion Capture (กล้อง):** ปัจจุบันฟีเจอร์ Motion Capture (การใช้กล้องประมวลผล MediaPipe Pose 3D) **ยังไม่สามารถใช้งานได้** (ยังอยู่ในช่วงพัฒนา) ระบบรองรับการวัดผลสดและการวิเคราะห์แรงปะทะผ่านเซนเซอร์ IMU (400Hz) และโมเดล AI เป็นหลัก
+
 | Component | State | Description |
 |-----------|-------|-------------|
 | Protocol & Shared Headers | ✅ Done | ESP-NOW 400Hz packet protocol, 4 body slots (protocol.h) |
 | Main Node Firmware | ✅ Done | ESP32-S3 AP, HTTPS/WSS, SD card logger, REST API, PROGMEM Web Server |
 | Strike Node Firmware | ✅ Done | ESP32-C3 + BMI160, I2C 400kHz, battery measurement & deep sleep |
-| Web Dashboard UI | ✅ Done | Real-time 4-slot telemetry, MediaPipe 3D Pose, In-browser TF.js AI |
+| Web Dashboard UI | ✅ Done | Real-time 4-slot telemetry, In-browser TF.js AI, Strike physics |
 | SD Card Data Logger | ✅ Done | CSV session logging, session manager API & web replay |
 | AI Pipeline & Bridge | ✅ Done | 1D-CNN training (`train_model.py`), `retrain.sh`, dynamic SD model storage |
+| Motion Capture (Camera Pose) | ⚠️ Not Working | ฟีเจอร์กล้องจับพิกัดโครงร่างยังไม่พร้อมใช้งาน (อยู่ระหว่างพัฒนา) |
 | Custom PCB / Enclosure | ⏳ Active | Hardware enclosure and PCB layout files |
 
 ## Quick Start (Build & Flash Firmware)

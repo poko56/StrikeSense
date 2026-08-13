@@ -14,7 +14,7 @@
 Dashboard เป็น Single-Page App (Vite · vanilla JS · PROGMEM embedded) ที่:
 1. รับข้อมูล IMU ความถี่ 400 Hz จาก Strike Nodes ครบทั้ง 4 จุด (มือซ้าย, มือขวา, แข้งซ้าย, แข้งขวา) ผ่าน WebSocket
 2. วิเคราะห์และตรวจจับการออกอาวุธแบบ real-time ด้วย **In-browser TensorFlow.js 1D-CNN AI Model** ร่วมกับ **Gaussian priors physics engine**
-3. รองรับ **MediaPipe Pose 3D Landmarker (Dual Camera mode)** เพื่อจับพิกัดโครงร่างของร่างกายร่วมกับ IMU
+3. *[ยังไม่พร้อมใช้งาน]* **MediaPipe Pose 3D Landmarker (Dual Camera mode)** — ฟีเจอร์กล้องจับพิกัดโครงร่างยังไม่เปิดใช้งาน (อยู่ระหว่างพัฒนา)
 4. คำนวณ performance metrics (Live Impact Power, Velocity Graph, Strike Score 0-100, Stamina Tracker)
 5. ควบคุมการบันทึก session, รอบการซ้อม (Round timer), และจัดการคลังโมเดล AI (`/api/models`) บน SD Card
 

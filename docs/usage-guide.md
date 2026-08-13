@@ -12,7 +12,7 @@
 |---|---|
 | Wi-Fi SSID | **`StrikeSense`** |
 | Wi-Fi Password | **`muaythai123`** |
-| Dashboard (กล้อง + sensor) | **`https://192.168.4.1`** (Local CA) หรือ **`https://<hostname>`** (Let's Encrypt) |
+| Dashboard (sensor + AI) | **`https://192.168.4.1`** (Local CA) หรือ **`https://<hostname>`** *(หมายเหตุ: ฟีเจอร์กล้อง Motion Capture ยังไม่เปิดใช้งาน)* |
 | WebSocket (IMU stream) | URL เดียวกับ Dashboard โดยเปลี่ยนเป็น `wss://…/ws` |
 | REST API base | secure origin เดียวกัน + `/api/…` |
 
